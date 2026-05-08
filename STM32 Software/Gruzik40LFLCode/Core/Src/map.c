@@ -17,6 +17,8 @@ extern LineFollower_t GRUZIK;
 extern FRESULT FatFsResult;
 extern FIL SdCardFile;
 
+static uint8_t ReadMapLine(Map_t *map);
+
 static float clampf(float value, float min_value, float max_value)
 {
     if (value > max_value)
@@ -28,6 +30,81 @@ static float clampf(float value, float min_value, float max_value)
         return min_value;
     }
     return value;
+}
+
+static void UpdateLineError(LineFollower_t *LF)
+{
+    int position = LineFollower_UpdateSensors(LF);
+    float error = 6500.0f - (float)position;
+
+    LF->P = error;
+    LF->Error_P = error;
+    LF->D = error - LF->Last_error;
+    LF->Error_D = LF->D;
+    LF->Last_error = error;
+}
+
+static float LineConfidence(const LineFollower_t *LF)
+{
+    if (LF->actives == 0)
+    {
+        return 0.0f;
+    }
+
+    float center_error = fabsf(6500.0f - (float)LF->SensorPosition);
+    float confidence = 1.0f - clampf((center_error - 1800.0f) / 3600.0f, 0.0f, 1.0f);
+
+    if (LF->actives > 7)
+    {
+        confidence *= 0.45f;
+    }
+
+    return confidence;
+}
+
+static uint8_t AdvanceMapTarget(Map_t *map)
+{
+    map->PreviousSetX = map->SetX;
+    map->PreviousSetY = map->SetY;
+    return ReadMapLine(map);
+}
+
+static uint8_t ShouldAdvanceTarget(const Map_t *map, const Pose2D_t *pose, float distance_to_target)
+{
+    if (distance_to_target < ROBOT_MAP_TARGET_RADIUS_M)
+    {
+        return 1u;
+    }
+
+    if (map->TargetValid == 0u)
+    {
+        return 0u;
+    }
+
+    float segment_x = map->SetX - map->PreviousSetX;
+    float segment_y = map->SetY - map->PreviousSetY;
+    float segment_len_sq = (segment_x * segment_x) + (segment_y * segment_y);
+    if (segment_len_sq < 0.000001f)
+    {
+        return 0u;
+    }
+
+    float pose_x = pose->x_m - map->PreviousSetX;
+    float pose_y = pose->y_m - map->PreviousSetY;
+    float projection = ((pose_x * segment_x) + (pose_y * segment_y)) / segment_len_sq;
+    float lateral_error = fabsf((pose_x * segment_y) - (pose_y * segment_x)) / sqrtf(segment_len_sq);
+
+    if ((projection > 1.02f) && (lateral_error < ROBOT_MAP_ADVANCE_LATERAL_M))
+    {
+        return 1u;
+    }
+
+    if (projection > 1.30f)
+    {
+        return 1u;
+    }
+
+    return 0u;
 }
 
 static uint8_t ReadMapLine(Map_t *map)
@@ -113,12 +190,16 @@ uint8_t Map_BeginPlayback(Map_t *map)
     map->PlaybackActive = 0u;
     map->ErrorSum = 0.0f;
     map->LastError = 0.0f;
+    map->PreviousSetX = 0.0f;
+    map->PreviousSetY = 0.0f;
+    map->TargetValid = 0u;
 
     if (ReadMapLine(map) == 0u)
     {
         return 0u;
     }
 
+    map->TargetValid = 1u;
     map->PlaybackActive = 1u;
     return 1u;
 }
@@ -181,9 +262,9 @@ uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose)
     float dy = map->SetY - map->Yri;
     float distance_to_target = sqrtf((dx * dx) + (dy * dy));
 
-    while (distance_to_target < ROBOT_MAP_TARGET_RADIUS_M)
+    while (ShouldAdvanceTarget(map, pose, distance_to_target) != 0u)
     {
-        if (ReadMapLine(map) == 0u)
+        if (AdvanceMapTarget(map) == 0u)
         {
             map->PlaybackActive = 0u;
             return 0u;
@@ -201,9 +282,37 @@ uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose)
     float error_derivative = error - map->LastError;
     map->LastError = error;
 
-    float correction = (map->p * error) + (map->i * map->ErrorSum) + (map->d * error_derivative);
-    float right_speed = clampf(map->SetSpeed + correction, -ROBOT_PWM_MAX, ROBOT_PWM_MAX);
-    float left_speed = clampf(map->SetSpeed - correction, -ROBOT_PWM_MAX, ROBOT_PWM_MAX);
+    float odom_correction = (map->p * error) + (map->i * map->ErrorSum) + (map->d * error_derivative);
+    odom_correction = clampf(odom_correction,
+                             -ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM,
+                             ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM);
+
+    UpdateLineError(&GRUZIK);
+    float line_correction = (GRUZIK.P * GRUZIK.Kp) + (GRUZIK.D * GRUZIK.Kd);
+    line_correction = clampf(line_correction,
+                             -ROBOT_PLAYBACK_LINE_CORR_LIMIT_PWM,
+                             ROBOT_PLAYBACK_LINE_CORR_LIMIT_PWM);
+
+    float motor_correction = -odom_correction;
+    float base_speed = map->SetSpeed;
+
+    float line_confidence = LineConfidence(&GRUZIK);
+    if (line_confidence > 0.0f)
+    {
+        motor_correction += line_correction * ROBOT_PLAYBACK_LINE_WEIGHT * line_confidence;
+    }
+
+    if (GRUZIK.actives == 0)
+    {
+        base_speed *= ROBOT_PLAYBACK_LOST_LINE_SPEED_MUL;
+    }
+
+    motor_correction = clampf(motor_correction,
+                              -ROBOT_PLAYBACK_CORR_LIMIT_PWM,
+                              ROBOT_PLAYBACK_CORR_LIMIT_PWM);
+
+    float left_speed = clampf(base_speed + motor_correction, -ROBOT_PWM_MAX, ROBOT_PWM_MAX);
+    float right_speed = clampf(base_speed - motor_correction, -ROBOT_PWM_MAX, ROBOT_PWM_MAX);
 
     motor_control(&GRUZIK, right_speed, left_speed);
     return 1u;

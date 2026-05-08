@@ -15,6 +15,15 @@
 #define MY_NAME "GRUZIK4.0"
 #define PARSER_LINE_BUFFER_SIZE 64u
 
+typedef enum
+{
+    TELEMETRY_OFF = 0,
+    TELEMETRY_ODOM = 1,
+    TELEMETRY_DEBUG = 2
+} TelemetryMode_t;
+
+extern volatile uint8_t TelemetryMode;
+
 void Parser_TakeLine(RingBuffer_t *Buf, uint8_t *ReceivedData);
 void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower);
 void Read_Settings_From_EEprom(LineFollower_t *LF, int mode);

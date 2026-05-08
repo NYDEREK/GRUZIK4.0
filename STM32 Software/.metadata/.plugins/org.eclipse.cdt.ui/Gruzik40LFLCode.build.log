@@ -1,0 +1,10 @@
+23:22:24 **** Incremental Build of configuration Debug for project Gruzik40LFLCode ****
+make -j8 all 
+arm-none-eabi-size  Gruzik40LFLCode.elf 
+   text	   data	    bss	    dec	    hex	filename
+  94988	    492	  29708	 125188	  1e904	Gruzik40LFLCode.elf
+Finished building: default.size.stdout
+ 
+
+23:22:25 Build Finished. 0 errors, 0 warnings. (took 702ms)
+

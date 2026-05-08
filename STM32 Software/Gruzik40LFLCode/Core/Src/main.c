@@ -39,6 +39,7 @@
 #include "odometry.h"
 #include "robot_config.h"
 #include <math.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,6 +50,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define ENCODER_SPEED_FILTER_ALPHA 0.35f
+#define ROBOT_TELEMETRY_PERIOD_MS 100u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -84,9 +86,13 @@ void SystemClock_Config(void);
 static void Robot_LoadDefaultSettings(void);
 static void Robot_StartPeripherals(void);
 static void Robot_ResetEncoderCounters(void);
+static void Robot_SampleSensorsWhenStopped(void);
 static void Robot_UpdateOdometryTick(void);
 static void Robot_UpdateSpeedStats(void);
 static void Robot_StopOutputs(void);
+static void Robot_ServiceTelemetry(void);
+static void Robot_SendOdomTelemetry(void);
+static void Robot_SendDebugTelemetry(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -169,6 +175,8 @@ int main(void)
         Parser_Parse(ReceivedData, &GRUZIK);
         ReceivedLines--;
     }
+
+    Robot_ServiceTelemetry();
   }
   /* USER CODE END 3 */
 }
@@ -288,6 +296,24 @@ static void Robot_ResetEncoderCounters(void)
     __HAL_TIM_SET_COUNTER(&htim1, ROBOT_ENCODER_COUNTER_CENTER);
 }
 
+static void Robot_SampleSensorsWhenStopped(void)
+{
+    Motor_L.EncoderValue = __HAL_TIM_GET_COUNTER(&htim4);
+    Motor_R.EncoderValue = __HAL_TIM_GET_COUNTER(&htim1);
+    Robot_ResetEncoderCounters();
+
+    Motor_CalculateSpeed(&Motor_L);
+    Motor_CalculateSpeed(&Motor_R);
+    (void)ICM_Read_GyroZ(&ICM);
+
+    if ((fabsf(Motor_L.DistanceInMeasurement) < ROBOT_ENCODER_STATIONARY_M) &&
+        (fabsf(Motor_R.DistanceInMeasurement) < ROBOT_ENCODER_STATIONARY_M) &&
+        (fabsf(ICM.Gyro_Z) < ROBOT_GYRO_STATIONARY_DPS))
+    {
+        ICM_UpdateGyroZBias(&ICM, ROBOT_GYRO_BIAS_LEARN_RATE);
+    }
+}
+
 static void Robot_UpdateOdometryTick(void)
 {
     Motor_L.EncoderValue = __HAL_TIM_GET_COUNTER(&htim4);
@@ -342,6 +368,91 @@ static void Robot_StopOutputs(void)
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
 }
 
+static void Robot_ServiceTelemetry(void)
+{
+    static uint32_t last_telemetry_ms = 0u;
+
+    if (TelemetryMode == TELEMETRY_OFF)
+    {
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+    if ((now - last_telemetry_ms) < ROBOT_TELEMETRY_PERIOD_MS)
+    {
+        return;
+    }
+    last_telemetry_ms = now;
+
+    if (TelemetryMode == TELEMETRY_DEBUG)
+    {
+        (void)LineFollower_UpdateSensors(&GRUZIK);
+        Robot_SendOdomTelemetry();
+        Robot_SendDebugTelemetry();
+    }
+    else
+    {
+        Robot_SendOdomTelemetry();
+    }
+}
+
+static void Robot_SendOdomTelemetry(void)
+{
+    char tx[192];
+    int len = snprintf(tx, sizeof(tx),
+                       "ODOM,%.4f,%.4f,%.2f,%.4f,%.3f,%.3f,%.2f,%.2f,%.2f\r\n",
+                       RobotOdom.pose.x_m,
+                       RobotOdom.pose.y_m,
+                       RobotOdom.pose.yaw_rad * RAD_TO_DEG,
+                       RobotOdom.total_distance_m,
+                       Motor_L.MetersPerSecondLPF.output,
+                       Motor_R.MetersPerSecondLPF.output,
+                       ICM.Gyro_Z,
+                       RobotOdom.encoder_yaw_rad * RAD_TO_DEG,
+                       RobotOdom.gyro_yaw_rad * RAD_TO_DEG);
+
+    if ((len > 0) && (len < (int)sizeof(tx)))
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t *)tx, (uint16_t)len, 100);
+    }
+}
+
+static void Robot_SendDebugTelemetry(void)
+{
+    char tx[320];
+    int len = snprintf(tx, sizeof(tx),
+                       "DBG,%d,%d,%d,%ld,%ld,%.1f,%.1f,%.4f,%.4f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\r\n",
+                       GRUZIK.SensorPosition,
+                       GRUZIK.actives,
+                       GRUZIK.Last_end,
+                       (long)Motor_L.EncoderDeltaCounts,
+                       (long)Motor_R.EncoderDeltaCounts,
+                       Motor_L.EncoderRpmFilter.output,
+                       Motor_R.EncoderRpmFilter.output,
+                       Motor_L.DistanceTraveled,
+                       Motor_R.DistanceTraveled,
+                       ICM.Gyro_Z_RawDps,
+                       ICM.Gyro_Z_BiasDps,
+                       ICM.Gyro_Z,
+                       GRUZIK.Adc1_Values[0],
+                       GRUZIK.Adc1_Values[1],
+                       GRUZIK.Adc1_Values[2],
+                       GRUZIK.Adc1_Values[3],
+                       GRUZIK.Adc1_Values[5],
+                       GRUZIK.Adc1_Values[6],
+                       GRUZIK.Adc1_Values[7],
+                       GRUZIK.Adc1_Values[8],
+                       GRUZIK.Adc2_Values[0],
+                       GRUZIK.Adc2_Values[1],
+                       GRUZIK.Adc2_Values[2],
+                       GRUZIK.Adc2_Values[3]);
+
+    if ((len > 0) && (len < (int)sizeof(tx)))
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t *)tx, (uint16_t)len, 100);
+    }
+}
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
@@ -363,7 +474,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     {
         if (GRUZIK.PowerMode != Start)
         {
-            Robot_ResetEncoderCounters();
+            if (TelemetryMode != TELEMETRY_OFF)
+            {
+                Robot_SampleSensorsWhenStopped();
+            }
+            else
+            {
+                Robot_ResetEncoderCounters();
+            }
             return;
         }
 

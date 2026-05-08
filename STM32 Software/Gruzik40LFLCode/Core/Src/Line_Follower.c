@@ -83,6 +83,11 @@ static int SensorRead(LineFollower_t *LF)
     return LF->SensorPosition;
 }
 
+int LineFollower_UpdateSensors(LineFollower_t *LF)
+{
+    return SensorRead(LF);
+}
+
 void motor_control(LineFollower_t *LF, float pos_right, float pos_left)
 {
     float speed_scale = (LF->Speed_level > 0.05f) ? LF->Speed_level : 1.0f;
@@ -165,7 +170,7 @@ static void past_errors(LineFollower_t *LF, int error)
 
 void PID_control(LineFollower_t *LF)
 {
-    uint16_t position = (uint16_t)SensorRead(LF);
+    uint16_t position = (uint16_t)LineFollower_UpdateSensors(LF);
     float error = 6500.0f - (float)position;
 
     LF->P = error;

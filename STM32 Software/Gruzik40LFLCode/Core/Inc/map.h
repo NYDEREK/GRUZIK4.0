@@ -43,6 +43,8 @@ typedef struct
 
     float SetX;
     float SetY;
+    float PreviousSetX;
+    float PreviousSetY;
     float SetRotation;
     float SetSpeed;
     float DefaultPlaybackSpeed;
@@ -55,6 +57,7 @@ typedef struct
     float mi;
 
     uint8_t loopNumber;
+    uint8_t TargetValid;
 } Map_t;
 
 void Map_Reset(Map_t *map);

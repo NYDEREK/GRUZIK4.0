@@ -17,15 +17,80 @@
 #include <string.h>
 
 extern FRESULT FatFsResult;
+extern FATFS SdFatFs;
 extern FIL SdCardFile;
+extern uint8_t SDReadingReady;
 extern Map_t map;
 extern Odometry_t RobotOdom;
+volatile uint8_t TelemetryMode = TELEMETRY_OFF;
 
 static uint8_t SdFileOpen = 0u;
+static uint16_t MapUploadPointCount = 0u;
+static uint16_t MapUploadExpectedCount = 0u;
 
 static void UartSend(const char *text)
 {
-    HAL_UART_Transmit(&huart1, (uint8_t *)text, strlen(text), 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)text, strlen(text), 500);
+}
+
+static void SendFatFsError(const char *prefix, const char *operation, const char *file_name, FRESULT result)
+{
+    char tx[96];
+    snprintf(tx, sizeof(tx), "%s,%s,%s,%u\r\n", prefix, operation, file_name, (unsigned int)result);
+    UartSend(tx);
+}
+
+static uint8_t SdEnsureMounted(const char *context)
+{
+    FatFsResult = f_mount(&SdFatFs, "", 1);
+    if (FatFsResult == FR_OK)
+    {
+        SDReadingReady = 1u;
+        return 1u;
+    }
+
+    (void)f_mount(NULL, "", 0);
+    HAL_Delay(20);
+    FatFsResult = f_mount(&SdFatFs, "", 1);
+    if (FatFsResult == FR_OK)
+    {
+        SDReadingReady = 1u;
+        return 1u;
+    }
+
+    SDReadingReady = 0u;
+    SendFatFsError("SD_ERROR", "mount", context, FatFsResult);
+    return 0u;
+}
+
+static uint8_t SdOpenFile(const char *error_prefix, const char *operation, const char *file_name, BYTE mode)
+{
+    if (SdEnsureMounted(file_name) == 0u)
+    {
+        return 0u;
+    }
+
+    FatFsResult = f_open(&SdCardFile, file_name, mode);
+    if (FatFsResult == FR_OK)
+    {
+        return 1u;
+    }
+
+    (void)f_mount(NULL, "", 0);
+    HAL_Delay(20);
+    if (SdEnsureMounted(file_name) == 0u)
+    {
+        return 0u;
+    }
+
+    FatFsResult = f_open(&SdCardFile, file_name, mode);
+    if (FatFsResult == FR_OK)
+    {
+        return 1u;
+    }
+
+    SendFatFsError(error_prefix, operation, file_name, FatFsResult);
+    return 0u;
 }
 
 static char *NextValue(void)
@@ -178,6 +243,191 @@ static void Map_speed_change(void)
     ParseFloatValue(&map.DefaultPlaybackSpeed);
 }
 
+static void Telemetry_change(void)
+{
+    char *parse_pointer = NextValue();
+    if (parse_pointer == NULL)
+    {
+        return;
+    }
+
+    if ((!strcmp(parse_pointer, "odom")) || (!strcmp(parse_pointer, "ODOM")) || (!strcmp(parse_pointer, "1")))
+    {
+        TelemetryMode = TELEMETRY_ODOM;
+        UartSend("TELEMETRY,odom\r\n");
+    }
+    else if ((!strcmp(parse_pointer, "debug")) || (!strcmp(parse_pointer, "DEBUG")) || (!strcmp(parse_pointer, "2")))
+    {
+        TelemetryMode = TELEMETRY_DEBUG;
+        UartSend("TELEMETRY,debug\r\n");
+    }
+    else
+    {
+        TelemetryMode = TELEMETRY_OFF;
+        UartSend("TELEMETRY,off\r\n");
+    }
+}
+
+static const char *MapFileFromKind(const char *kind, const char **normalized_kind)
+{
+    if ((kind != NULL) &&
+        ((!strcmp(kind, "optimized")) || (!strcmp(kind, "map")) || (!strcmp(kind, "map.txt"))))
+    {
+        *normalized_kind = "optimized";
+        return ROBOT_MAP_INPUT_FILE;
+    }
+
+    *normalized_kind = "recorded";
+    return ROBOT_MAP_OUTPUT_FILE;
+}
+
+static uint8_t ReadTransferLine(char *line, size_t line_size)
+{
+    UINT len = 0u;
+    uint8_t i = 0u;
+    uint8_t sample = 0u;
+
+    while (i < (uint8_t)(line_size - 1u))
+    {
+        if ((f_read(&SdCardFile, &sample, 1, &len) != FR_OK) || (len == 0u))
+        {
+            break;
+        }
+
+        if (sample == '\r')
+        {
+            continue;
+        }
+
+        if (sample == '\n')
+        {
+            break;
+        }
+
+        line[i++] = (char)sample;
+    }
+
+    line[i] = '\0';
+    return ((i > 0u) || (len != 0u)) ? 1u : 0u;
+}
+
+static void SendMapDump(LineFollower_t *LF)
+{
+    if (LF->PowerMode == Start)
+    {
+        UartSend("MAP_ERROR,stop_robot_first\r\n");
+        return;
+    }
+
+    char *requested_kind = NextValue();
+    const char *dump_kind = "recorded";
+    const char *file_name = MapFileFromKind(requested_kind, &dump_kind);
+
+    if (SdFileOpen != 0u)
+    {
+        f_close(&SdCardFile);
+        SdFileOpen = 0u;
+    }
+
+    if (SdOpenFile("MAP_ERROR", "open_read", file_name, FA_READ) == 0u)
+    {
+        return;
+    }
+
+    char tx[160];
+    char line[112];
+    uint16_t count = 0u;
+    snprintf(tx, sizeof(tx), "MAP_BEGIN,%s\r\n", dump_kind);
+    UartSend(tx);
+
+    while (ReadTransferLine(line, sizeof(line)) != 0u)
+    {
+        snprintf(tx, sizeof(tx), "MAP,%s\r\n", line);
+        UartSend(tx);
+        count++;
+        HAL_Delay(2);
+    }
+
+    f_close(&SdCardFile);
+    snprintf(tx, sizeof(tx), "MAP_END,%u\r\n", count);
+    UartSend(tx);
+}
+
+static void MapUploadBegin(LineFollower_t *LF)
+{
+    if (LF->PowerMode == Start)
+    {
+        UartSend("UPLOAD_ERROR,stop_robot_first\r\n");
+        return;
+    }
+
+    float expected_count = 0.0f;
+    (void)ParseFloatValue(&expected_count);
+
+    if (SdFileOpen != 0u)
+    {
+        f_close(&SdCardFile);
+        SdFileOpen = 0u;
+    }
+
+    if (SdOpenFile("UPLOAD_ERROR", "open_write", ROBOT_MAP_INPUT_FILE, FA_WRITE | FA_CREATE_ALWAYS) == 0u)
+    {
+        return;
+    }
+
+    SdFileOpen = 1u;
+    MapUploadPointCount = 0u;
+    MapUploadExpectedCount = (uint16_t)expected_count;
+
+    char tx[80];
+    snprintf(tx, sizeof(tx), "UPLOAD_READY,%u\r\n", MapUploadExpectedCount);
+    UartSend(tx);
+}
+
+static void MapUploadPoint(void)
+{
+    if (SdFileOpen == 0u)
+    {
+        UartSend("UPLOAD_ERROR,no_file\r\n");
+        return;
+    }
+
+    float x = 0.0f;
+    float y = 0.0f;
+    float speed = map.DefaultPlaybackSpeed;
+    if ((!ParseFloatValue(&x)) || (!ParseFloatValue(&y)))
+    {
+        UartSend("UPLOAD_ERROR,bad_point\r\n");
+        return;
+    }
+    (void)ParseFloatValue(&speed);
+
+    char line[64];
+    snprintf(line, sizeof(line), "%0.3f\t%0.3f\t%0.3f\n", x, y, speed);
+    f_puts((TCHAR *)line, &SdCardFile);
+    MapUploadPointCount++;
+
+    if ((MapUploadPointCount % 50u) == 0u)
+    {
+        char tx[80];
+        snprintf(tx, sizeof(tx), "UPLOAD_PROGRESS,%u,%u\r\n", MapUploadPointCount, MapUploadExpectedCount);
+        UartSend(tx);
+    }
+}
+
+static void MapUploadEnd(void)
+{
+    if (SdFileOpen != 0u)
+    {
+        f_close(&SdCardFile);
+        SdFileOpen = 0u;
+    }
+
+    char tx[80];
+    snprintf(tx, sizeof(tx), "UPLOAD_DONE,%u,%u\r\n", MapUploadPointCount, MapUploadExpectedCount);
+    UartSend(tx);
+}
+
 static void SetState(LineFollower_t *LF, uint8_t state)
 {
     if (LF->PowerMode == Start)
@@ -231,6 +481,29 @@ static void StopRobot(LineFollower_t *LF)
     LF->AverageSpeedSum = 0.0f;
 }
 
+static void PrepareStoppedStart(LineFollower_t *LF)
+{
+    LF->LineFollowing = 0u;
+    LF->PowerMode = Stop;
+    map.Mapping = 0u;
+    map.PlaybackActive = 0u;
+    TelemetryMode = TELEMETRY_OFF;
+
+    motor_control(LF, 0.0f, 0.0f);
+    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+
+    if (SdFileOpen != 0u)
+    {
+        f_close(&SdCardFile);
+        SdFileOpen = 0u;
+    }
+
+    LF->AverageSpeed = 0.0f;
+    LF->MaxSpeed = 0.0f;
+    LF->AverageSpeedNum = 0.0f;
+    LF->AverageSpeedSum = 0.0f;
+}
+
 static void StartRobot(LineFollower_t *LF)
 {
     float battery_percentage;
@@ -260,14 +533,19 @@ static void StartRobot(LineFollower_t *LF)
     Odometry_Reset(&RobotOdom);
     LF->Orientation = 0.0f;
     LF->Yaw = 0.0f;
+    LF->Last_error = 0.0f;
+    LF->P = 0.0f;
+    LF->D = 0.0f;
+    LF->Error_P = 0.0f;
+    LF->Error_D = 0.0f;
+    LF->Last_idle = 0;
+    LF->LastEndTimer = HAL_GetTick();
     LF->UnMappingDone = 0u;
 
     if (LF->state == Mapping)
     {
-        FatFsResult = f_open(&SdCardFile, ROBOT_MAP_OUTPUT_FILE, FA_WRITE | FA_CREATE_ALWAYS);
-        if (FatFsResult != FR_OK)
+        if (SdOpenFile("MAP_ERROR", "open_write", ROBOT_MAP_OUTPUT_FILE, FA_WRITE | FA_CREATE_ALWAYS) == 0u)
         {
-            UartSend("Cannot open mapping output file\r\n");
             return;
         }
         SdFileOpen = 1u;
@@ -275,10 +553,8 @@ static void StartRobot(LineFollower_t *LF)
     }
     else if (LF->state == UnMapping)
     {
-        FatFsResult = f_open(&SdCardFile, ROBOT_MAP_INPUT_FILE, FA_READ);
-        if (FatFsResult != FR_OK)
+        if (SdOpenFile("MAP_ERROR", "open_playback", ROBOT_MAP_INPUT_FILE, FA_READ) == 0u)
         {
-            UartSend("Cannot open map.txt for playback\r\n");
             return;
         }
         SdFileOpen = 1u;
@@ -299,6 +575,25 @@ static void StartRobot(LineFollower_t *LF)
     LF->PowerMode = Start;
 }
 
+static void StartWithState(LineFollower_t *LF, uint8_t state)
+{
+    PrepareStoppedStart(LF);
+    LF->state = state;
+    if (state == Mapping)
+    {
+        UartSend("STARTING,mapping\r\n");
+    }
+    else if (state == UnMapping)
+    {
+        UartSend("STARTING,playback\r\n");
+    }
+    else
+    {
+        UartSend("STARTING,normal\r\n");
+    }
+    StartRobot(LF);
+}
+
 static void App_Controll(char rx_data, LineFollower_t *LF)
 {
     if (rx_data == 'N')
@@ -307,7 +602,14 @@ static void App_Controll(char rx_data, LineFollower_t *LF)
     }
     else if ((rx_data == 'Y') || (rx_data == 'C'))
     {
-        StartRobot(LF);
+        if (LF->PowerMode != Start)
+        {
+            StartRobot(LF);
+        }
+        else
+        {
+            UartSend("Already started\r\n");
+        }
     }
     else if (rx_data == 'P')
     {
@@ -321,6 +623,12 @@ static void App_Controll(char rx_data, LineFollower_t *LF)
     {
         SetState(LF, UnMapping);
     }
+}
+
+static void Start_command(LineFollower_t *LF, uint8_t state)
+{
+    (void)NextValue();
+    StartWithState(LF, state);
 }
 
 static void Mode_change(LineFollower_t *LF)
@@ -402,6 +710,18 @@ void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower)
     {
         State_change(LineFollower);
     }
+    else if (!strcmp("StartNormal", parse_pointer))
+    {
+        Start_command(LineFollower, PidFollowing);
+    }
+    else if (!strcmp("StartMapping", parse_pointer))
+    {
+        Start_command(LineFollower, Mapping);
+    }
+    else if (!strcmp("StartPlayback", parse_pointer))
+    {
+        Start_command(LineFollower, UnMapping);
+    }
     else if (!strcmp("Treshold", parse_pointer))
     {
         Sensor_treshold_change(LineFollower);
@@ -433,6 +753,30 @@ void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower)
     else if (!strcmp("MapSpeed", parse_pointer))
     {
         Map_speed_change();
+    }
+    else if (!strcmp("Telemetry", parse_pointer))
+    {
+        Telemetry_change();
+    }
+    else if (!strcmp("Debug", parse_pointer))
+    {
+        Telemetry_change();
+    }
+    else if (!strcmp("MapDump", parse_pointer))
+    {
+        SendMapDump(LineFollower);
+    }
+    else if (!strcmp("MapUploadBegin", parse_pointer))
+    {
+        MapUploadBegin(LineFollower);
+    }
+    else if (!strcmp("MapPoint", parse_pointer))
+    {
+        MapUploadPoint();
+    }
+    else if (!strcmp("MapUploadEnd", parse_pointer))
+    {
+        MapUploadEnd();
     }
 }
 

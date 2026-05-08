@@ -24,18 +24,24 @@
 #define ROBOT_CONTROL_DT_S                  0.001f
 #define ROBOT_PWM_MAX                       286.0f
 
-#define ROBOT_LEFT_ENCODER_DIRECTION        1
+#define ROBOT_LEFT_ENCODER_DIRECTION        -1
 #define ROBOT_RIGHT_ENCODER_DIRECTION       1
 #define ROBOT_ENCODER_YAW_DIRECTION         1.0f
 #define ROBOT_IMU_Z_DIRECTION               1.0f
 
-#define ROBOT_ODOMETRY_GYRO_WEIGHT          0.92f
+#define ROBOT_ODOMETRY_GYRO_WEIGHT          0.96f
 #define ROBOT_GYRO_STATIONARY_DPS           2.0f
 #define ROBOT_ENCODER_STATIONARY_M          0.00002f
 #define ROBOT_GYRO_BIAS_LEARN_RATE          0.0005f
 
 #define ROBOT_MAP_RECORD_EVERY_TICKS        40u
-#define ROBOT_MAP_TARGET_RADIUS_M           0.050f
+#define ROBOT_MAP_TARGET_RADIUS_M           0.075f
+#define ROBOT_MAP_ADVANCE_LATERAL_M         0.120f
+#define ROBOT_PLAYBACK_LINE_WEIGHT          0.18f
+#define ROBOT_PLAYBACK_LINE_CORR_LIMIT_PWM  35.0f
+#define ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM  115.0f
+#define ROBOT_PLAYBACK_CORR_LIMIT_PWM       140.0f
+#define ROBOT_PLAYBACK_LOST_LINE_SPEED_MUL  0.85f
 #define ROBOT_MAP_OUTPUT_FILE               "GRUZIK.txt"
 #define ROBOT_MAP_INPUT_FILE                "map.txt"
 
