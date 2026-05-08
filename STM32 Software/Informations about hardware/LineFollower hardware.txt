@@ -1,0 +1,30 @@
+Dimension:
+wheel center to wheel center: 195mm 
+whole robot width: 204mm
+Base center to sensor: 220mm
+Mass: ~84g
+GearRatio: 8:40 (8 on motor shaft and 40 on wheel)
+
+Wheel Dimensions:
+Diameter: 23mm
+Width: 11 mm
+
+4 Wheels ~~ one motor for two wheels
+
+1--|Wheel                  Wheel|--3
+  -|Motor --------+------- Motor|-     
+2--|Wheel                  Wheel|--4
+|<-------      195mm        ------>|
+
+
+
+Hardware parts:
+ - uC:STM32G474RET6byme
+ - Motor Driver: TB6612FNG
+ - Bluetooth module: HC-04 (Bluetooth to uart)
+ - Motors: FAULHABER 1024SR 6V 
+ - IEP3-128(only AB signals) mounted on the motor shaft
+ - 12x Ktir sensor
+ - ICM-42688p via SPI 
+	
+

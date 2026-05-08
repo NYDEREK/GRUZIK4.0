@@ -1,0 +1,10 @@
+../Core/Src/ICM-42688p.c:22:13:ICM_Select	1
+../Core/Src/ICM-42688p.c:27:13:ICM_Deselect	1
+../Core/Src/ICM-42688p.c:32:16:ICM_Write8	2
+../Core/Src/ICM-42688p.c:43:16:ICM_Read	3
+../Core/Src/ICM-42688p.c:58:16:ICM_SelectBank	1
+../Core/Src/ICM-42688p.c:63:9:ICM_Init	8
+../Core/Src/ICM-42688p.c:119:9:ICM_Read_GyroZ	2
+../Core/Src/ICM-42688p.c:133:9:ICM_Read_Temp	2
+../Core/Src/ICM-42688p.c:146:9:ICM_CalibrateGyroZ	6
+../Core/Src/ICM-42688p.c:179:6:ICM_UpdateGyroZBias	1

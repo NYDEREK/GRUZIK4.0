@@ -1,0 +1,5 @@
+../Core/Src/motor.c:12:14:clampf	24	static
+../Core/Src/motor.c:25:6:Motor_Init	24	static
+../Core/Src/motor.c:34:6:Motor_SetEncoderDirection	16	static
+../Core/Src/motor.c:39:6:Motor_CalculateSpeed	24	static
+../Core/Src/motor.c:69:6:PI_Loop	16	static

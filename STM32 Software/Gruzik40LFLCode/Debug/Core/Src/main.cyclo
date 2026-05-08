@@ -1,0 +1,11 @@
+../Core/Src/main.c:101:5:main	5
+../Core/Src/main.c:180:6:SystemClock_Config	3
+../Core/Src/main.c:223:13:Robot_LoadDefaultSettings	1
+../Core/Src/main.c:261:13:Robot_StartPeripherals	1
+../Core/Src/main.c:285:13:Robot_ResetEncoderCounters	1
+../Core/Src/main.c:291:13:Robot_UpdateOdometryTick	5
+../Core/Src/main.c:321:13:Robot_UpdateSpeedStats	3
+../Core/Src/main.c:339:13:Robot_StopOutputs	1
+../Core/Src/main.c:345:6:HAL_UART_RxCpltCallback	4
+../Core/Src/main.c:360:6:HAL_TIM_PeriodElapsedCallback	11
+../Core/Src/main.c:419:6:Error_Handler	1

@@ -1,0 +1,9 @@
+../Core/Src/Line_Follower.c:12:14:clampf	24	static
+../Core/Src/Line_Follower.c:25:17:SensorValueAt	16	static
+../Core/Src/Line_Follower.c:37:12:SensorRead	32	static
+../Core/Src/Line_Follower.c:86:6:motor_control	40	static
+../Core/Src/Line_Follower.c:119:13:sharp_turn	16	static
+../Core/Src/Line_Follower.c:145:13:forward_brake	24	static
+../Core/Src/Line_Follower.c:157:13:past_errors	24	static
+../Core/Src/Line_Follower.c:166:6:PID_control	40	static
+../Core/Src/Line_Follower.c:188:7:GetAverageSpeed	16	static
