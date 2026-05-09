@@ -18,6 +18,7 @@ extern FRESULT FatFsResult;
 extern FIL SdCardFile;
 
 static uint8_t ReadMapLine(Map_t *map);
+static void WriteMapRecord(float x_ri, float y_ri, float x_pc, float y_pc, float speed_mps, float error_p, float error_d);
 
 static float clampf(float value, float min_value, float max_value)
 {
@@ -171,6 +172,14 @@ static uint8_t ReadMapLine(Map_t *map)
     }
 }
 
+static void WriteMapRecord(float x_ri, float y_ri, float x_pc, float y_pc, float speed_mps, float error_p, float error_d)
+{
+    uint8_t buffer[128];
+    snprintf((char *)buffer, sizeof(buffer), "%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\n",
+             x_ri, y_ri, x_pc, y_pc, speed_mps, error_p, error_d);
+    f_puts((TCHAR *)buffer, &SdCardFile);
+}
+
 void Map_Reset(Map_t *map)
 {
     float p = map->p;
@@ -190,6 +199,7 @@ uint8_t Map_BeginPlayback(Map_t *map)
     map->PlaybackActive = 0u;
     map->ErrorSum = 0.0f;
     map->LastError = 0.0f;
+    map->FilteredErrorDerivative = 0.0f;
     map->PreviousSetX = 0.0f;
     map->PreviousSetY = 0.0f;
     map->TargetValid = 0u;
@@ -204,11 +214,11 @@ uint8_t Map_BeginPlayback(Map_t *map)
     return 1u;
 }
 
-void MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p, float error_d)
+uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p, float error_d)
 {
     if (map->Mapping == 0u)
     {
-        return;
+        return 1u;
     }
 
     map->PreviousXri = map->Xri;
@@ -222,6 +232,26 @@ void MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p,
     map->Ori = pose->yaw_rad;
     map->Pci[0] = map->Xri + (ROBOT_SENSOR_OFFSET_M * cosf(map->Ori));
     map->Pci[1] = map->Yri + (ROBOT_SENSOR_OFFSET_M * sinf(map->Ori));
+
+    if (map->StartValid == 0u)
+    {
+        map->StartValid = 1u;
+        map->StartXri = map->Xri;
+        map->StartYri = map->Yri;
+        map->StartOri = map->Ori;
+        map->StartPci[0] = map->Pci[0];
+        map->StartPci[1] = map->Pci[1];
+        map->PreviousXri = map->Xri;
+        map->PreviousYri = map->Yri;
+        map->PreviousOri = map->Ori;
+        map->PreviousPci[0] = map->Pci[0];
+        map->PreviousPci[1] = map->Pci[1];
+        map->Ai = map->Ori;
+        map->PreviousAi = map->Ori;
+        WriteMapRecord(map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
+        map->RecordedPoints++;
+        return 1u;
+    }
 
     float dx = map->Pci[0] - map->PreviousPci[0];
     float dy = map->Pci[1] - map->PreviousPci[1];
@@ -237,14 +267,27 @@ void MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p,
 
     if (map->loopNumber >= ROBOT_MAP_RECORD_EVERY_TICKS)
     {
-        uint8_t buffer[128];
         map->loopNumber = 0u;
-        snprintf((char *)buffer, sizeof(buffer), "%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\n",
-                 map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
-        f_puts((TCHAR *)buffer, &SdCardFile);
+        WriteMapRecord(map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
+        map->RecordedPoints++;
     }
 
     map->loopNumber++;
+    float close_dx = map->Xri - map->StartXri;
+    float close_dy = map->Yri - map->StartYri;
+    float close_distance = sqrtf((close_dx * close_dx) + (close_dy * close_dy));
+    if ((map->Si >= ROBOT_MAP_CLOSE_MIN_DISTANCE_M) &&
+        (map->RecordedPoints >= ROBOT_MAP_CLOSE_MIN_POINTS) &&
+        (close_distance <= ROBOT_MAP_CLOSE_RADIUS_M))
+    {
+        WriteMapRecord(map->StartXri, map->StartYri, map->StartPci[0], map->StartPci[1], speed_mps, error_p, error_d);
+        map->RecordedPoints++;
+        map->AutoClosed = 1u;
+        map->Mapping = 0u;
+        return 0u;
+    }
+
+    return 1u;
 }
 
 uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose)
@@ -275,17 +318,39 @@ uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose)
         distance_to_target = sqrtf((dx * dx) + (dy * dy));
     }
 
-    map->SetRotation = atan2f(dy, dx);
-    float error = Odometry_NormalizeAngle(map->SetRotation - map->Ori);
+    float segment_x = map->SetX - map->PreviousSetX;
+    float segment_y = map->SetY - map->PreviousSetY;
+    float segment_len = sqrtf((segment_x * segment_x) + (segment_y * segment_y));
+    float error;
+
+    if (segment_len > 0.000001f)
+    {
+        map->SetRotation = atan2f(segment_y, segment_x);
+        float pose_x = map->Xri - map->PreviousSetX;
+        float pose_y = map->Yri - map->PreviousSetY;
+        float cross_track = ((pose_x * segment_y) - (pose_y * segment_x)) / segment_len;
+        cross_track = clampf(cross_track, -ROBOT_PLAYBACK_CROSSTRACK_LIMIT_M, ROBOT_PLAYBACK_CROSSTRACK_LIMIT_M);
+        float speed_ratio = clampf(fabsf(map->SetSpeed) / ROBOT_PWM_MAX, 0.0f, 1.0f);
+        float lookahead = ROBOT_PLAYBACK_LOOKAHEAD_BASE_M + (ROBOT_PLAYBACK_LOOKAHEAD_SPEED_M * speed_ratio);
+        error = Odometry_NormalizeAngle((map->SetRotation - map->Ori) + atan2f(cross_track, lookahead));
+    }
+    else
+    {
+        map->SetRotation = atan2f(dy, dx);
+        error = Odometry_NormalizeAngle(map->SetRotation - map->Ori);
+    }
+
     map->ErrorSum = clampf(map->ErrorSum + error, -3.0f, 3.0f);
 
-    float error_derivative = error - map->LastError;
+    float error_derivative = Odometry_NormalizeAngle(error - map->LastError);
     map->LastError = error;
+    map->FilteredErrorDerivative += ROBOT_PLAYBACK_D_FILTER_ALPHA * (error_derivative - map->FilteredErrorDerivative);
 
-    float odom_correction = (map->p * error) + (map->i * map->ErrorSum) + (map->d * error_derivative);
+    float odom_correction = (map->p * error) + (map->i * map->ErrorSum) + (map->d * map->FilteredErrorDerivative);
+    float odom_limit = clampf(fabsf(map->SetSpeed) * 0.85f, 45.0f, ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM);
     odom_correction = clampf(odom_correction,
-                             -ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM,
-                             ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM);
+                             -odom_limit,
+                             odom_limit);
 
     UpdateLineError(&GRUZIK);
     float line_correction = (GRUZIK.P * GRUZIK.Kp) + (GRUZIK.D * GRUZIK.Kd);
@@ -295,6 +360,8 @@ uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose)
 
     float motor_correction = -odom_correction;
     float base_speed = map->SetSpeed;
+    float turn_speed_scale = 1.0f - (clampf(fabsf(error), 0.0f, 1.0f) * ROBOT_PLAYBACK_TURN_SPEED_REDUCTION);
+    base_speed *= turn_speed_scale;
 
     float line_confidence = LineConfidence(&GRUZIK);
     if (line_confidence > 0.0f)

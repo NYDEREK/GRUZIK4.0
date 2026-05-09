@@ -78,6 +78,7 @@ uint8_t RxData;
 RingBuffer_t ReceiveBuffer;
 uint8_t ReceivedData[PARSER_LINE_BUFFER_SIZE];
 volatile uint8_t ReceivedLines;
+volatile uint8_t MappingAutoClosePending;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -174,6 +175,12 @@ int main(void)
         Parser_TakeLine(&ReceiveBuffer, ReceivedData);
         Parser_Parse(ReceivedData, &GRUZIK);
         ReceivedLines--;
+    }
+
+    if (MappingAutoClosePending != 0u)
+    {
+        MappingAutoClosePending = 0u;
+        Parser_FinishMappingAutoClosed(&GRUZIK);
     }
 
     Robot_ServiceTelemetry();
@@ -490,7 +497,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         if (GRUZIK.state == Mapping)
         {
             float speed_mps = 0.5f * (Motor_R.MetersPerSecondLPF.output + Motor_L.MetersPerSecondLPF.output);
-            MapUpdate(&map, &RobotOdom.pose, speed_mps, GRUZIK.Error_P, GRUZIK.Error_D);
+            if (MapUpdate(&map, &RobotOdom.pose, speed_mps, GRUZIK.Error_P, GRUZIK.Error_D) == 0u)
+            {
+                GRUZIK.PowerMode = Stop;
+                map.Mapping = 0u;
+                Robot_StopOutputs();
+                MappingAutoClosePending = 1u;
+            }
         }
         else if (GRUZIK.state == UnMapping)
         {
@@ -524,7 +537,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         }
         else
         {
-            Robot_StopOutputs();
+            Parser_ServiceManualDriveTimeout(&GRUZIK);
+            if ((TireCleaningActive == 0u) && (ManualDriveActive == 0u))
+            {
+                Robot_StopOutputs();
+            }
         }
     }
 }

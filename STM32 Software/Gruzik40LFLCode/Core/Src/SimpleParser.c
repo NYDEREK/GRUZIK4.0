@@ -12,6 +12,7 @@
 #include "odometry.h"
 #include "robot_config.h"
 #include "usart.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,10 +24,14 @@ extern uint8_t SDReadingReady;
 extern Map_t map;
 extern Odometry_t RobotOdom;
 volatile uint8_t TelemetryMode = TELEMETRY_OFF;
+volatile uint8_t TireCleaningActive = 0u;
+volatile uint8_t ManualDriveActive = 0u;
 
 static uint8_t SdFileOpen = 0u;
 static uint16_t MapUploadPointCount = 0u;
 static uint16_t MapUploadExpectedCount = 0u;
+static float TireCleanSpeed = 170.0f;
+static uint32_t ManualDriveLastTick = 0u;
 
 static void UartSend(const char *text)
 {
@@ -243,6 +248,157 @@ static void Map_speed_change(void)
     ParseFloatValue(&map.DefaultPlaybackSpeed);
 }
 
+static float ClampPwm(float value)
+{
+    if (value > ROBOT_PWM_MAX)
+    {
+        return ROBOT_PWM_MAX;
+    }
+    if (value < -ROBOT_PWM_MAX)
+    {
+        return -ROBOT_PWM_MAX;
+    }
+    return value;
+}
+
+static void Tire_clean_speed_change(void)
+{
+    float speed = 0.0f;
+    if (ParseFloatValue(&speed))
+    {
+        if (speed < 0.0f)
+        {
+            speed = 0.0f;
+        }
+        else if (speed > 250.0f)
+        {
+            speed = 250.0f;
+        }
+        TireCleanSpeed = speed;
+    }
+}
+
+static void Manual_drive_change(LineFollower_t *LF)
+{
+    float left_speed = 0.0f;
+    float right_speed = 0.0f;
+    if (!ParseFloatValue(&left_speed))
+    {
+        return;
+    }
+    if (!ParseFloatValue(&right_speed))
+    {
+        right_speed = left_speed;
+    }
+
+    if ((fabsf(left_speed) < 0.5f) && (fabsf(right_speed) < 0.5f))
+    {
+        ManualDriveActive = 0u;
+        motor_control(LF, 0.0f, 0.0f);
+        HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+        return;
+    }
+
+    if (LF->PowerMode == Start)
+    {
+        UartSend("MANUAL_ERROR,robot_running\r\n");
+        return;
+    }
+
+    if (SdFileOpen != 0u)
+    {
+        f_close(&SdCardFile);
+        SdFileOpen = 0u;
+    }
+
+    TireCleaningActive = 0u;
+    ManualDriveActive = 1u;
+    ManualDriveLastTick = HAL_GetTick();
+    LF->LineFollowing = 0u;
+    LF->PowerMode = Stop;
+    map.Mapping = 0u;
+    map.PlaybackActive = 0u;
+    TelemetryMode = TELEMETRY_OFF;
+
+    left_speed = ClampPwm(left_speed);
+    right_speed = ClampPwm(right_speed);
+    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
+    motor_control(LF, right_speed, left_speed);
+}
+
+static void Tire_clean_change(LineFollower_t *LF)
+{
+    float enabled = 0.0f;
+    if (!ParseFloatValue(&enabled))
+    {
+        return;
+    }
+
+    if (enabled > 0.0f)
+    {
+        if (LF->PowerMode == Start)
+        {
+            UartSend("CLEAN_ERROR,robot_running\r\n");
+            return;
+        }
+
+        if (SdFileOpen != 0u)
+        {
+            f_close(&SdCardFile);
+            SdFileOpen = 0u;
+        }
+
+        LF->LineFollowing = 0u;
+        LF->PowerMode = Stop;
+        map.Mapping = 0u;
+        map.PlaybackActive = 0u;
+        TelemetryMode = TELEMETRY_OFF;
+        ManualDriveActive = 0u;
+        TireCleaningActive = 1u;
+        HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_SET);
+        motor_control(LF, TireCleanSpeed, TireCleanSpeed);
+        UartSend("CLEAN,start\r\n");
+    }
+    else
+    {
+        TireCleaningActive = 0u;
+        motor_control(LF, 0.0f, 0.0f);
+        HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+        UartSend("CLEAN,stop\r\n");
+    }
+}
+
+void Parser_ServiceManualDriveTimeout(LineFollower_t *LF)
+{
+    if ((ManualDriveActive != 0u) && ((HAL_GetTick() - ManualDriveLastTick) > 350u))
+    {
+        ManualDriveActive = 0u;
+        motor_control(LF, 0.0f, 0.0f);
+        HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+    }
+}
+
+void Parser_FinishMappingAutoClosed(LineFollower_t *LF)
+{
+    LF->LineFollowing = 0u;
+    LF->PowerMode = Stop;
+    map.Mapping = 0u;
+    map.PlaybackActive = 0u;
+    TireCleaningActive = 0u;
+    ManualDriveActive = 0u;
+
+    motor_control(LF, 0.0f, 0.0f);
+    HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+
+    if (SdFileOpen != 0u)
+    {
+        f_close(&SdCardFile);
+        SdFileOpen = 0u;
+    }
+
+    UartSend("MAP_AUTO_CLOSED,start_radius_3cm\r\n");
+}
+
 static void Telemetry_change(void)
 {
     char *parse_pointer = NextValue();
@@ -457,6 +613,8 @@ static void StopRobot(LineFollower_t *LF)
     LF->PowerMode = Stop;
     map.Mapping = 0u;
     map.PlaybackActive = 0u;
+    TireCleaningActive = 0u;
+    ManualDriveActive = 0u;
 
     motor_control(LF, 0.0f, 0.0f);
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
@@ -488,6 +646,8 @@ static void PrepareStoppedStart(LineFollower_t *LF)
     map.Mapping = 0u;
     map.PlaybackActive = 0u;
     TelemetryMode = TELEMETRY_OFF;
+    TireCleaningActive = 0u;
+    ManualDriveActive = 0u;
 
     motor_control(LF, 0.0f, 0.0f);
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
@@ -528,6 +688,8 @@ static void StartRobot(LineFollower_t *LF)
         f_close(&SdCardFile);
         SdFileOpen = 0u;
     }
+    TireCleaningActive = 0u;
+    ManualDriveActive = 0u;
 
     Map_Reset(&map);
     Odometry_Reset(&RobotOdom);
@@ -753,6 +915,18 @@ void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower)
     else if (!strcmp("MapSpeed", parse_pointer))
     {
         Map_speed_change();
+    }
+    else if ((!strcmp("CleanSpeed", parse_pointer)) || (!strcmp("TireCleanSpeed", parse_pointer)))
+    {
+        Tire_clean_speed_change();
+    }
+    else if ((!strcmp("Clean", parse_pointer)) || (!strcmp("TireClean", parse_pointer)))
+    {
+        Tire_clean_change(LineFollower);
+    }
+    else if ((!strcmp("Manual", parse_pointer)) || (!strcmp("Joystick", parse_pointer)))
+    {
+        Manual_drive_change(LineFollower);
     }
     else if (!strcmp("Telemetry", parse_pointer))
     {

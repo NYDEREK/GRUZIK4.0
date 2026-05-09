@@ -224,3 +224,38 @@ arm-none-eabi-size  Gruzik40LFLCode.elf
   94988	    492	  29708	 125188	  1e904	Gruzik40LFLCode.elf
 Finished building: default.size.stdout
  
+11:48:56 **** Incremental Build of configuration Debug for project Gruzik40LFLCode ****
+make -j8 all 
+arm-none-eabi-size  Gruzik40LFLCode.elf 
+   text	   data	    bss	    dec	    hex	filename
+  95572	    496	  29704	 125772	  1eb4c	Gruzik40LFLCode.elf
+Finished building: default.size.stdout
+ 
+11:49:59 **** Incremental Build of configuration Debug for project Gruzik40LFLCode ****
+make -j8 all 
+arm-none-eabi-size  Gruzik40LFLCode.elf 
+   text	   data	    bss	    dec	    hex	filename
+  95572	    496	  29704	 125772	  1eb4c	Gruzik40LFLCode.elf
+Finished building: default.size.stdout
+ 
+12:16:03 **** Incremental Build of configuration Debug for project Gruzik40LFLCode ****
+make -j8 all 
+arm-none-eabi-size  Gruzik40LFLCode.elf 
+   text	   data	    bss	    dec	    hex	filename
+  97364	    496	  29736	 127596	  1f26c	Gruzik40LFLCode.elf
+Finished building: default.size.stdout
+ 
+12:16:34 **** Incremental Build of configuration Debug for project Gruzik40LFLCode ****
+make -j8 all 
+arm-none-eabi-size  Gruzik40LFLCode.elf 
+   text	   data	    bss	    dec	    hex	filename
+  97364	    496	  29736	 127596	  1f26c	Gruzik40LFLCode.elf
+Finished building: default.size.stdout
+ 
+12:34:54 **** Incremental Build of configuration Debug for project Gruzik40LFLCode ****
+make -j8 all 
+arm-none-eabi-size  Gruzik40LFLCode.elf 
+   text	   data	    bss	    dec	    hex	filename
+  98044	    496	  29736	 128276	  1f514	Gruzik40LFLCode.elf
+Finished building: default.size.stdout
+ 

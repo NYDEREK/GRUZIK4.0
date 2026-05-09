@@ -41,6 +41,12 @@ typedef struct
     float PreviousAi;
     float Ki;
 
+    float StartXri;
+    float StartYri;
+    float StartOri;
+    float StartPci[2];
+    uint16_t RecordedPoints;
+
     float SetX;
     float SetY;
     float PreviousSetX;
@@ -54,15 +60,18 @@ typedef struct
     float d;
     float ErrorSum;
     float LastError;
+    float FilteredErrorDerivative;
     float mi;
 
     uint8_t loopNumber;
     uint8_t TargetValid;
+    uint8_t StartValid;
+    uint8_t AutoClosed;
 } Map_t;
 
 void Map_Reset(Map_t *map);
 uint8_t Map_BeginPlayback(Map_t *map);
-void MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p, float error_d);
+uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p, float error_d);
 uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose);
 
 #endif /* INC_MAP_H_ */
