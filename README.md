@@ -219,8 +219,8 @@ Jezeli robot nie trzyma trasy:
 
 Projekt STM32 jest przygotowany pod STM32CubeIDE.
 
-Androidowa aplikacja jest w osobnym folderze na pulpicie:
+Androidowa aplikacja jest teraz w repo:
 
-`C:\Users\SNYDE\Desktop\RobotApp`
+`Android App/RobotApp`
 
 Firmware do robota musi byc wgrany przez ST-Link / STM32CubeProgrammer. Aplikacje Android mozna zbudowac Gradle i wgrac przez ADB.
