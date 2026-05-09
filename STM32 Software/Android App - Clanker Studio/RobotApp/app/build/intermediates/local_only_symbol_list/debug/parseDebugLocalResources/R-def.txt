@@ -1,0 +1,13 @@
+R_DEF: Internal format may change without notice
+local
+color robot_accent
+color robot_bg
+color robot_muted
+color robot_panel
+color robot_start
+color robot_stop
+color robot_text
+dimen app_padding
+drawable ic_launcher
+string app_name
+style AppTheme
