@@ -26,9 +26,11 @@ Turbine_Speed=0\n
 Turbine_Prep_Time=0\n
 Mode=Y\n
 Mode=N\n
+```
 
 Mapping protocol:
-```
+
+```text
 Mode=M\n                 # select mapping mode
 Mode=U\n                 # select playback/unmapping mode
 MapDump=recorded\n       # robot streams GRUZIK.txt as MAP_BEGIN/MAP/MAP_END
@@ -36,8 +38,12 @@ MapDump=optimized\n      # robot streams map.txt as MAP_BEGIN/MAP/MAP_END
 MapUploadBegin=<count>\n # app starts writing map.txt on SD
 MapPoint=<x>,<y>,<pwm>\n # one optimized waypoint
 MapUploadEnd=1\n         # app closes map.txt
-```
+
+Bluetooth service:
+BtName=<name>\n          # stores requested HC-04/HC-05 name in btname.txt on SD
+BtNameNow=<name>\n       # tries AT rename immediately if the module is already in AT mode
 ```
 
 Open this folder in Android Studio, let it sync Gradle, then build/install on the phone.
 Pair the HC-04/HC-05 module in Android Bluetooth settings first, then connect from the app.
+After a real module rename, remove the old Android pairing and pair the module again so Android refreshes the displayed name.

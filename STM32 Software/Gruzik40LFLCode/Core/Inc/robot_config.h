@@ -24,6 +24,10 @@
 #define ROBOT_CONTROL_DT_S                  0.001f
 #define ROBOT_PWM_MAX                       286.0f
 
+#define ROBOT_GAP_BRIDGE_TIMEOUT_MS         4000u
+#define ROBOT_GAP_BRIDGE_CENTER_ERROR       2000.0f
+#define ROBOT_GAP_BRIDGE_EDGE_GUARD_COUNT   2u
+
 #define ROBOT_LEFT_ENCODER_DIRECTION        -1
 #define ROBOT_RIGHT_ENCODER_DIRECTION       1
 #define ROBOT_ENCODER_YAW_DIRECTION         1.0f
@@ -52,6 +56,13 @@
 #define ROBOT_PLAYBACK_LOST_LINE_SPEED_MUL  0.85f
 #define ROBOT_MAP_OUTPUT_FILE               "GRUZIK.txt"
 #define ROBOT_MAP_INPUT_FILE                "map.txt"
+
+#define ROBOT_BT_DATA_BAUD                  9600u
+#define ROBOT_BT_AT_BAUD_PRIMARY            9600u
+#define ROBOT_BT_AT_BAUD_SECONDARY          38400u
+#define ROBOT_BT_AT_TIMEOUT_MS              220u
+#define ROBOT_BT_NAME_FILE                  "btname.txt"
+#define ROBOT_BT_NAME_MAX_LEN               20u
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f

@@ -72,6 +72,16 @@ Potem dziala klasyczny regulator:
 
 Ten tryb jest najlepszy do zwyklej jazdy, bo robot caly czas patrzy na fizyczna linie, a nie na zapisane wspolrzedne.
 
+### Przerwy w linii
+
+Normalny PID ma dodatkowy tryb przejazdu przez krotka przerwe w tasmie. Robot uzbraja ten tryb tylko wtedy, gdy ostatni odczyt byl bezpieczny:
+
+- linia byla widoczna,
+- blad byl blisko srodka listwy,
+- skrajne sensory nie byly aktywne.
+
+Jesli zaraz po takim odczycie wszystkie sensory przestana widziec linie, robot nie robi od razu sharp turn. Przez maksymalnie `4000 ms` jedzie ostatnimi poprawnymi komendami silnikow. Gdy linia wroci, bridge natychmiast sie wylacza i PID dziala normalnie. Jesli linia nie wroci przez ten czas, robot wraca do standardowego odzyskiwania linii na podstawie `Last_end`.
+
 ## Mapowanie trasy
 
 Mapowanie jest w `map.c`.

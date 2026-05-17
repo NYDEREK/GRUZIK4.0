@@ -30,6 +30,7 @@ void Parser_TakeLine(RingBuffer_t *Buf, uint8_t *ReceivedData);
 void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower);
 void Parser_FinishMappingAutoClosed(LineFollower_t *LineFollower);
 void Parser_ServiceManualDriveTimeout(LineFollower_t *LineFollower);
+uint8_t Parser_ServicePendingBluetoothName(void);
 void Read_Settings_From_EEprom(LineFollower_t *LF, int mode);
 
 #endif /* INC_SIMPLEPARSER_H_ */
