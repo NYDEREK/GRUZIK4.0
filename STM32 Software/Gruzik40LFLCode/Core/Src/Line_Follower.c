@@ -8,6 +8,7 @@
 #include "main.h"
 #include "robot_config.h"
 #include "tim.h"
+#include <math.h>
 
 static float clampf(float value, float min_value, float max_value)
 {
@@ -147,14 +148,78 @@ static void sharp_turn(LineFollower_t *LF)
     }
 }
 
+static uint8_t EdgeSensorsActive(const LineFollower_t *LF)
+{
+    for (uint8_t i = 0u; i < ROBOT_GAP_BRIDGE_EDGE_GUARD_COUNT; i++)
+    {
+        if (LF->SensorValues[i] != 0u)
+        {
+            return 1u;
+        }
+        if (LF->SensorValues[11u - i] != 0u)
+        {
+            return 1u;
+        }
+    }
+
+    return 0u;
+}
+
+static uint8_t GapBridgeCandidate(const LineFollower_t *LF, float error)
+{
+    if (LF->actives <= 0)
+    {
+        return 0u;
+    }
+
+    if (fabsf(error) > ROBOT_GAP_BRIDGE_CENTER_ERROR)
+    {
+        return 0u;
+    }
+
+    return (EdgeSensorsActive(LF) == 0u) ? 1u : 0u;
+}
+
+static uint8_t TryGapBridge(LineFollower_t *LF)
+{
+    uint32_t now = HAL_GetTick();
+
+    if (LF->GapBridgeActive != 0u)
+    {
+        if ((now - LF->GapBridgeStartMs) <= ROBOT_GAP_BRIDGE_TIMEOUT_MS)
+        {
+            motor_control(LF, LF->LastLineMotorRight, LF->LastLineMotorLeft);
+            return 1u;
+        }
+
+        LF->GapBridgeActive = 0u;
+        LF->GapBridgeArmed = 0u;
+        return 0u;
+    }
+
+    if (LF->GapBridgeArmed != 0u)
+    {
+        LF->GapBridgeActive = 1u;
+        LF->GapBridgeStartMs = now;
+        motor_control(LF, LF->LastLineMotorRight, LF->LastLineMotorLeft);
+        return 1u;
+    }
+
+    return 0u;
+}
+
 static void forward_brake(LineFollower_t *LF, float pos_right, float pos_left)
 {
     if (LF->actives == 0)
     {
-        sharp_turn(LF);
+        if (TryGapBridge(LF) == 0u)
+        {
+            sharp_turn(LF);
+        }
     }
     else
     {
+        LF->GapBridgeActive = 0u;
         motor_control(LF, pos_right, pos_left);
     }
 }
@@ -171,6 +236,13 @@ static void past_errors(LineFollower_t *LF, int error)
 void PID_control(LineFollower_t *LF)
 {
     uint16_t position = (uint16_t)LineFollower_UpdateSensors(LF);
+
+    if (LF->actives == 0)
+    {
+        forward_brake(LF, 0.0f, 0.0f);
+        return;
+    }
+
     float error = 6500.0f - (float)position;
 
     LF->P = error;
@@ -186,6 +258,10 @@ void PID_control(LineFollower_t *LF)
 
     left_speed = clampf(left_speed, -ROBOT_PWM_MAX, LF->Max_speed_L);
     right_speed = clampf(right_speed, -ROBOT_PWM_MAX, LF->Max_speed_R);
+
+    LF->LastLineMotorRight = right_speed;
+    LF->LastLineMotorLeft = left_speed;
+    LF->GapBridgeArmed = GapBridgeCandidate(LF, error);
 
     forward_brake(LF, right_speed, left_speed);
 }

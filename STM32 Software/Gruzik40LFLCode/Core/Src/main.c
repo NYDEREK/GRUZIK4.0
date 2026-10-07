@@ -152,6 +152,7 @@ int main(void)
 
   FatFsResult = f_mount(&SdFatFs, "", 1);
   SDReadingReady = (FatFsResult == FR_OK) ? 1u : 0u;
+  (void)Parser_ServicePendingBluetoothName();
 
   GRUZIK.PowerMode = Stop;
   /* USER CODE END 2 */
@@ -253,6 +254,11 @@ static void Robot_LoadDefaultSettings(void)
     GRUZIK.Speed_level = 1.0f;
     GRUZIK.treshold = 3300u;
     GRUZIK.LastEndTimer = HAL_GetTick();
+    GRUZIK.GapBridgeActive = 0u;
+    GRUZIK.GapBridgeArmed = 0u;
+    GRUZIK.GapBridgeStartMs = 0u;
+    GRUZIK.LastLineMotorRight = 0.0f;
+    GRUZIK.LastLineMotorLeft = 0.0f;
 
     map.p = 90.0f;
     map.i = 0.0f;

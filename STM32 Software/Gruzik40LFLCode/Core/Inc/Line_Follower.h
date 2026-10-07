@@ -60,6 +60,12 @@ typedef struct
     int Errors[10];
     float Last_error;
 
+    float LastLineMotorRight;
+    float LastLineMotorLeft;
+    uint32_t GapBridgeStartMs;
+    uint8_t GapBridgeArmed;
+    uint8_t GapBridgeActive;
+
     uint8_t LineFollowing;
 
     uint32_t DSHOTTimer;

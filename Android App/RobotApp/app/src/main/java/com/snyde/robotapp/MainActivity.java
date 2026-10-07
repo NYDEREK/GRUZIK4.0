@@ -63,6 +63,8 @@ public class MainActivity extends Activity {
     private static final String KEY_MAP_D = "map.d";
     private static final String KEY_MAP_SPEED = "map.speed";
     private static final String KEY_JOYSTICK_SPEED = "joystick.speed";
+    private static final String KEY_BT_NAME = "bt.name";
+    private static final int BT_NAME_MAX_LEN = 20;
     private static final int REQUEST_BT_CONNECT = 41;
     private static final int TAB_DRIVE = 0;
     private static final int TAB_MAPPING = 1;
@@ -147,6 +149,8 @@ public class MainActivity extends Activity {
     private EditText mapDInput;
     private EditText mapSpeedInput;
     private EditText joystickSpeedInput;
+    private EditText btNameInput;
+    private TextView btNameStatusText;
     private TextView joystickStatusText;
     private long lastManualSendMs;
     private int lastManualLeft;
@@ -574,6 +578,35 @@ public class MainActivity extends Activity {
         stopButton.setOnClickListener(v -> sendCommand("Telemetry", "off"));
     }
 
+    private LinearLayout bluetoothNamePanel() {
+        LinearLayout panel = panel();
+        panel.addView(sectionTitle("Bluetooth name"), matchWrap());
+
+        btNameInput = input("GRUZIK4.0");
+        btNameInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        btNameStatusText = telemetryText("Save, reboot in KEY/AT mode, pair again");
+
+        LinearLayout inputRow = row();
+        inputRow.addView(labeledInput("Name", btNameInput),
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f));
+        Button saveButton = primaryButton("Save for KEY", ACCENT);
+        inputRow.addView(saveButton, new LinearLayout.LayoutParams(0, dp(76), 0.85f));
+        panel.addView(inputRow, matchWrap());
+
+        LinearLayout actionRow = row();
+        Button tryNowButton = button("Try AT now");
+        Button clearButton = button("Clear status");
+        actionRow.addView(tryNowButton, weightWrap());
+        actionRow.addView(clearButton, weightWrap());
+        panel.addView(actionRow, matchWrap());
+        panel.addView(btNameStatusText, matchWrap());
+
+        saveButton.setOnClickListener(v -> sendBluetoothName(false));
+        tryNowButton.setOnClickListener(v -> confirmBluetoothNameNow());
+        clearButton.setOnClickListener(v -> btNameStatusText.setText("Ready"));
+        return panel;
+    }
+
     private void buildDebugPage(LinearLayout root) {
         LinearLayout controlPanel = panel();
         controlPanel.addView(sectionTitle("Debug"), matchWrap());
@@ -586,6 +619,7 @@ public class MainActivity extends Activity {
         row.addView(stopButton, weightWrap());
         controlPanel.addView(row);
         root.addView(controlPanel, matchWrap());
+        root.addView(bluetoothNamePanel(), matchWrap());
 
         debugLineSummaryText = telemetryText("Line sensors idle");
         debugLineRawText = telemetryText("S01..S12: waiting");
@@ -832,6 +866,12 @@ public class MainActivity extends Activity {
         }
 
         if (line.startsWith("TELEMETRY,")) {
+            appendLog("< " + line + "\n");
+            return;
+        }
+
+        if (line.startsWith("BT_NAME_")) {
+            handleBluetoothNameStatus(line);
             appendLog("< " + line + "\n");
             return;
         }
@@ -1160,6 +1200,63 @@ public class MainActivity extends Activity {
         sendLine("MapD=" + mapDInput.getText().toString().trim() + "\n", true);
         sleepMs(18);
         sendLine("MapSpeed=" + mapSpeedInput.getText().toString().trim() + "\n", true);
+    }
+
+    private void confirmBluetoothNameNow() {
+        new AlertDialog.Builder(this)
+                .setTitle("Try AT now")
+                .setMessage("Use this only when the module is in AT mode. The BT link can drop after rename.")
+                .setPositiveButton("Try", (dialog, which) -> sendBluetoothName(true))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void sendBluetoothName(boolean tryNow) {
+        String name = btNameInput.getText().toString().trim();
+        if (!isValidBluetoothName(name)) {
+            toast("Use 1-20 chars: A-Z 0-9 space _ - .");
+            return;
+        }
+
+        prefs().edit().putString(KEY_BT_NAME, name).apply();
+        String command = tryNow ? "BtNameNow=" : "BtName=";
+        if (btNameStatusText != null) {
+            btNameStatusText.setText(tryNow ? "Trying AT rename..." : "Saved. Reboot robot in KEY/AT mode.");
+        }
+        new Thread(() -> sendLine(command + name + "\n", true)).start();
+    }
+
+    private boolean isValidBluetoothName(String name) {
+        if (name == null || name.length() == 0 || name.length() > BT_NAME_MAX_LEN) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean allowed = (c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == ' ' || c == '_' || c == '-' || c == '.';
+            if (!allowed) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void handleBluetoothNameStatus(String line) {
+        if (btNameStatusText == null) {
+            return;
+        }
+
+        if (line.startsWith("BT_NAME_PENDING,")) {
+            btNameStatusText.setText("Pending. Reboot robot in KEY/AT mode.");
+        } else if (line.startsWith("BT_NAME_OK,")) {
+            btNameStatusText.setText("Renamed. Remove pairing and pair again.");
+        } else if (line.startsWith("BT_NAME_ERROR,at_no_response")) {
+            btNameStatusText.setText("No AT response. Enter KEY/AT mode and reboot.");
+        } else {
+            btNameStatusText.setText(line);
+        }
     }
 
     private void sendCommand(String key, String value) {
@@ -1525,6 +1622,7 @@ public class MainActivity extends Activity {
         setText(mapDInput, store.getString(KEY_MAP_D, "10"));
         setText(mapSpeedInput, store.getString(KEY_MAP_SPEED, "80"));
         setText(joystickSpeedInput, store.getString(KEY_JOYSTICK_SPEED, "85"));
+        setText(btNameInput, store.getString(KEY_BT_NAME, "GRUZIK4.0"));
     }
 
     private void saveMappingSettings() {
@@ -1544,6 +1642,7 @@ public class MainActivity extends Activity {
                 .putString(KEY_MAP_D, mapDInput.getText().toString().trim())
                 .putString(KEY_MAP_SPEED, mapSpeedInput.getText().toString().trim())
                 .putString(KEY_JOYSTICK_SPEED, joystickSpeedInput.getText().toString().trim())
+                .putString(KEY_BT_NAME, btNameInput == null ? "GRUZIK4.0" : btNameInput.getText().toString().trim())
                 .apply();
     }
 
