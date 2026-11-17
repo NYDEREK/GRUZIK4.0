@@ -5,374 +5,832 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
-import android.widget.Toast;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
+/**
+ * Bluetooth controller for the NYDER line followers: GRUZIK4.0 (odometry, speed map) and
+ * REGIN V3 (turbine). Text protocol of SimpleParser.c, features follow what the robot reports.
+ */
 @SuppressWarnings("deprecation")
-public class MainActivity extends Activity {
-    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
-    private static final String PREFS = "robot_presets";
-    private static final String KEY_NAMES = "preset_names";
-    private static final String KEY_CLEAN_SPEED = "clean.speed";
-    private static final String KEY_OPT_STEP = "opt.step";
-    private static final String KEY_OPT_SMOOTH = "opt.smooth";
-    private static final String KEY_OPT_BASE_SPEED = "opt.base_speed";
-    private static final String KEY_OPT_GAIN = "opt.gain";
-    private static final String KEY_OPT_MIN_SPEED = "opt.min_speed";
-    private static final String KEY_OPT_MAX_SPEED = "opt.max_speed";
-    private static final String KEY_MAP_P = "map.p";
-    private static final String KEY_MAP_I = "map.i";
-    private static final String KEY_MAP_D = "map.d";
-    private static final String KEY_MAP_SPEED = "map.speed";
-    private static final String KEY_JOYSTICK_SPEED = "joystick.speed";
-    private static final String KEY_BT_NAME = "bt.name";
+public class MainActivity extends Activity implements BtLink.Listener {
+    private static final String PREFS = "nyder_lf";
+    private static final int REQUEST_BT = 41;
     private static final int BT_NAME_MAX_LEN = 20;
-    private static final int REQUEST_BT_CONNECT = 41;
+
     private static final int TAB_DRIVE = 0;
-    private static final int TAB_MAPPING = 1;
-    private static final int TAB_JOYSTICK = 2;
-    private static final int TAB_ODOMETRY = 3;
-    private static final int TAB_DEBUG = 4;
+    private static final int TAB_SENSORS = 1;
+    private static final int TAB_MAPPING = 2;
+    private static final int TAB_JOYSTICK = 3;
+    private static final int TAB_ODOMETRY = 4;
+    private static final int TAB_LOG = 5;
+    private static final int TAB_SETTINGS = 6;
+    private static final String[] TAB_NAMES = {"Drive", "Sensors", "Mapping", "Joystick", "Odometry", "Log", "Settings"};
 
-    private static final int BG = Color.rgb(14, 16, 20);
-    private static final int SURFACE = Color.rgb(24, 28, 34);
-    private static final int SURFACE_2 = Color.rgb(31, 36, 44);
-    private static final int SURFACE_PRESSED = Color.rgb(44, 52, 62);
-    private static final int STROKE = Color.rgb(58, 66, 78);
-    private static final int TEXT = Color.rgb(232, 238, 246);
-    private static final int MUTED = Color.rgb(148, 163, 184);
-    private static final int ACCENT = Color.rgb(20, 184, 166);
-    private static final int ACCENT_PRESSED = Color.rgb(15, 118, 110);
-    private static final int GREEN = Color.rgb(34, 197, 94);
-    private static final int RED = Color.rgb(239, 68, 68);
-    private static final int AMBER = Color.rgb(245, 158, 11);
+    // parameter groups
+    private static final int G_COMMON = 0;
+    private static final int G_TURBINE = 1;
+    private static final int G_CORNER = 2;
+    private static final int G_SPEED = 3;
+    private static final int G_ODOM = 4;
+    private static final int G_ROUTE = 5;
+    private static final int G_LOCAL = 6;
 
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final Object writeLock = new Object();
-    private final ArrayList<BluetoothDevice> pairedDevices = new ArrayList<>();
-    private final LinkedHashMap<String, EditText> fields = new LinkedHashMap<>();
+    private static final String START_NORMAL = "StartNormal";
+    private static final String START_MAPPING = "StartMapping";
+    private static final String START_ROUTE = "StartPlayback";
+    private static final String START_SPEED = "StartSpeedRun";
+
+    private final class Param {
+        final String key;
+        final String label;
+        final String def;
+        final String reginDef;
+        final int group;
+        final EditText input;
+        View view;
+
+        Param(String key, String label, String def, String reginDef, int group) {
+            this.key = key;
+            this.label = label;
+            this.def = def;
+            this.reginDef = reginDef;
+            this.group = group;
+            this.input = ui.numberInput(def);
+        }
+
+        String value() {
+            return input.getText().toString().trim().replace(',', '.');
+        }
+
+        float floatValue(float fallback) {
+            try {
+                return Float.parseFloat(value());
+            } catch (NumberFormatException ex) {
+                return fallback;
+            }
+        }
+    }
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private Ui ui;
+    private BtLink link;
+    private BluetoothAdapter adapter;
+    private final ArrayList<BluetoothDevice> paired = new ArrayList<>();
+    private final ArrayList<Param> params = new ArrayList<>();
     private final ArrayList<String> presetNames = new ArrayList<>();
+    private final ArrayList<TextView> tabLabels = new ArrayList<>();
+    private final ArrayList<View> tabViews = new ArrayList<>();
+    private final ArrayList<View> tabUnderlines = new ArrayList<>();
+    private final ArrayList<View> pages = new ArrayList<>();
+
+    private RobotProfile profile;
+    private int currentTab = TAB_DRIVE;
+    private boolean robotRunning;
+    private int robotState;
+    private String requestedTelemetry = "off";
+    private boolean streamPaused;
+    private boolean infoReceived;
+    private long lastStartAckMs;
+    private boolean autoDownloadSpeedMap;
+    private float gyroSuggestion = -1;
+
+    // header
+    private TextView titleText;
+    private TextView voltageText;
+    private TextView warningText;
+    private Spinner deviceSpinner;
+    private Button connectButton;
+
+    // drive
+    private View turbineSection;
+    private View cornerSection;
+    private Spinner presetSpinner;
+    private EditText presetNameInput;
+    private boolean presetTouched;
+    private Param cleanSpeed;
+
+    // sensors
+    private SensorBarsView sensorBars;
+    private TextView sensorErrorText;
+    private TextView sensorPositionText;
+    private TextView sensorSummaryText;
+    private Button sensorStreamButton;
+    private volatile String pendingSensorFrame;
+    private volatile boolean sensorFramePosted;
+    private int frameCount;
+    private long frameWindowStart;
+    private float frameRate;
+
+    // mapping
+    private TrackView trackView;
+    private SpeedProfileView profileView;
+    private final SpeedMapModel speedMap = new SpeedMapModel();
+    private TextView mapStatusText;
+    private TextView transferText;
+    private TextView liveSpeedText;
+    private TextView liveTargetText;
+    private TextView liveLapText;
+    private TextView liveSyncText;
+    private View speedMapSection;
+    private View liveReadouts;
+    private View routeSection;
+    private View gyroRow;
+    private TextView gyroText;
+    private Button speedRunButton;
+    private final Runnable rebuildProfile = this::rebuildSpeedProfile;
+    private String robotReadyText = "";
+
+    // legacy route
     private final ArrayList<RoutePoint> recordedRoute = new ArrayList<>();
     private final ArrayList<RoutePoint> optimizedRoute = new ArrayList<>();
-    private final ArrayList<RoutePoint> robotOptimizedRoute = new ArrayList<>();
+    private final ArrayList<RoutePoint> robotRoute = new ArrayList<>();
     private final ArrayList<RoutePoint> incomingRoute = new ArrayList<>();
-    private final StringBuilder rxLineBuffer = new StringBuilder();
-
-    private BluetoothAdapter bluetoothAdapter;
-    private BluetoothSocket socket;
-    private OutputStream outputStream;
-    private Thread readThread;
-    private volatile boolean readThreadRunning;
-    private volatile boolean uploadRunning;
-    private volatile long lastStartAckMs;
-
-    private Spinner deviceSpinner;
-    private Spinner presetSpinner;
-    private TextView statusText;
-    private TextView logText;
-    private TextView voltageText;
+    private String incomingRouteKind;
     private TextView routeInfoText;
-    private TextView transferText;
-    private EditText presetNameInput;
-    private EditText cleanSpeedInput;
+    private Param optStep;
+    private Param optSmooth;
+    private Param optBase;
+    private Param optGain;
+    private Param optMin;
+    private Param optMax;
 
-    private LinearLayout drivePage;
-    private LinearLayout mappingPage;
-    private LinearLayout joystickPage;
-    private LinearLayout odometryPage;
-    private LinearLayout debugPage;
-    private Button driveTabButton;
-    private Button mappingTabButton;
-    private Button joystickTabButton;
-    private Button odometryTabButton;
-    private Button debugTabButton;
-    private RouteMapView routeMapView;
+    // odometry
+    private TextView odomX;
+    private TextView odomY;
+    private TextView odomYaw;
+    private TextView odomDistance;
+    private TextView odomWheels;
+    private TextView odomGyro;
+    private TextView odomFusion;
+    private Param gyroScale;
 
-    private TextView odomXText;
-    private TextView odomYText;
-    private TextView odomYawText;
-    private TextView odomDistanceText;
-    private TextView odomSpeedText;
-    private TextView odomGyroText;
-    private TextView odomFusionText;
-    private TextView debugLineSummaryText;
-    private TextView debugLineRawText;
-    private TextView debugEncoderText;
-    private TextView debugImuText;
-
-    private EditText optStepInput;
-    private EditText optSmoothInput;
-    private EditText optBaseSpeedInput;
-    private EditText optGainInput;
-    private EditText optMinSpeedInput;
-    private EditText optMaxSpeedInput;
-    private EditText mapPInput;
-    private EditText mapIInput;
-    private EditText mapDInput;
-    private EditText mapSpeedInput;
-    private EditText joystickSpeedInput;
-    private EditText btNameInput;
-    private TextView btNameStatusText;
-    private TextView joystickStatusText;
-    private long lastManualSendMs;
+    // joystick, log, settings
+    private Param joystickSpeed;
+    private TextView joystickStatus;
+    private long lastManualMs;
     private int lastManualLeft;
     private int lastManualRight;
-
-    private String incomingMapKind;
+    private TextView logText;
+    private final StringBuilder logBuffer = new StringBuilder();
+    private boolean logPosted;
+    private EditText btNameInput;
+    private TextView btNameStatus;
+    private Spinner robotTypeSpinner;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        ui = new Ui(this);
+        link = new BtLink(this);
+        adapter = BluetoothAdapter.getDefaultAdapter();
+        profile = initialProfile();
         buildUi();
-        requestBluetoothPermissionIfNeeded();
+        loadParams();
         loadPresetNames();
-        loadPairedDevices();
-        if (!presetNames.isEmpty()) {
-            loadPreset(presetNames.get(0));
-        } else {
-            setDefaultValues();
+        applyProfile();
+        requestBluetoothPermissionIfNeeded();
+        selectTab(prefs().getInt("tab", TAB_DRIVE));
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (link.state() == BtLink.DISCONNECTED) {
+            loadPairedDevices();
         }
-        loadMappingSettings();
-        updateRouteUi();
     }
 
     @Override
     protected void onPause() {
-        saveMappingSettings();
+        saveParams();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
-        sendManualStopBlocking();
-        sendTireCleanStopBlocking();
-        closeConnection();
+        if (link.isConnected()) {
+            link.sendNow("Manual=0,0");
+            link.sendNow("Clean=0");
+            link.sendNow("Telemetry=off");
+        }
+        link.close();
         super.onDestroy();
     }
 
+    // ================================================================== UI
+
     private void buildUi() {
-        ScrollView scrollView = new ScrollView(this);
-        scrollView.setFillViewport(true);
-        scrollView.setBackgroundColor(BG);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(Ui.BG);
+        scroll.setOnApplyWindowInsetsListener(this::applySystemInsets);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(14), dp(16), dp(18));
-        scrollView.addView(root, matchWrap());
+        LinearLayout root = ui.column();
+        root.setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(24));
+        scroll.addView(root, ui.matchWrap());
 
-        TextView title = label("GRUZIK4.0", 26, TEXT);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        title.setGravity(Gravity.CENTER);
-        root.addView(title, matchWrap());
+        LinearLayout header = ui.row();
+        titleText = ui.label("", 20, Ui.TEXT);
+        titleText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        voltageText = ui.label("", 15, Ui.TEXT);
+        voltageText.setGravity(Gravity.END);
+        header.addView(titleText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        header.addView(voltageText, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        root.addView(header, ui.matchWrap());
 
-        statusText = label("Disconnected", 14, MUTED);
-        statusText.setGravity(Gravity.CENTER);
-        root.addView(statusText, matchWrap());
-
-        root.addView(connectionPanel(), matchWrap());
-        root.addView(tabRow(), matchWrap());
-
-        drivePage = new LinearLayout(this);
-        drivePage.setOrientation(LinearLayout.VERTICAL);
-        mappingPage = new LinearLayout(this);
-        mappingPage.setOrientation(LinearLayout.VERTICAL);
-        joystickPage = new LinearLayout(this);
-        joystickPage.setOrientation(LinearLayout.VERTICAL);
-        odometryPage = new LinearLayout(this);
-        odometryPage.setOrientation(LinearLayout.VERTICAL);
-        debugPage = new LinearLayout(this);
-        debugPage.setOrientation(LinearLayout.VERTICAL);
-
-        buildDrivePage(drivePage);
-        buildMappingPage(mappingPage);
-        buildJoystickPage(joystickPage);
-        buildOdometryPage(odometryPage);
-        buildDebugPage(debugPage);
-        root.addView(drivePage, matchWrap());
-        root.addView(mappingPage, matchWrap());
-        root.addView(joystickPage, matchWrap());
-        root.addView(odometryPage, matchWrap());
-        root.addView(debugPage, matchWrap());
-
-        addSpacer(root, 8);
-        logText = label("", 13, TEXT);
-        logText.setMinLines(7);
-        logText.setPadding(dp(10), dp(10), dp(10), dp(10));
-        logText.setBackground(panelDrawable(SURFACE, STROKE));
-        root.addView(logText, matchWrap());
-
-        setContentView(scrollView);
-        selectTab(TAB_DRIVE);
-    }
-
-    private LinearLayout connectionPanel() {
-        LinearLayout panel = panel();
+        LinearLayout connection = ui.row();
         deviceSpinner = new Spinner(this);
-        panel.addView(deviceSpinner, matchWrap());
+        connectButton = ui.button("Connect", Ui.STYLE_QUIET);
+        connection.addView(deviceSpinner, new LinearLayout.LayoutParams(0, ui.dp(48), 1f));
+        LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(ui.dp(116), ui.dp(48));
+        connectParams.setMargins(ui.dp(8), 0, 0, 0);
+        connection.addView(connectButton, connectParams);
+        root.addView(connection, ui.top(8));
+        connectButton.setOnClickListener(v -> onConnectClicked());
 
-        LinearLayout connectionRow = row();
-        Button refreshButton = button("Refresh");
-        Button connectButton = button("Connect");
-        Button disconnectButton = button("Disconnect");
-        connectionRow.addView(refreshButton, weightWrap());
-        connectionRow.addView(connectButton, weightWrap());
-        connectionRow.addView(disconnectButton, weightWrap());
-        panel.addView(connectionRow);
+        Button start = ui.button("Start", Ui.STYLE_PRIMARY);
+        Button stop = ui.button("Stop", Ui.STYLE_DANGER);
+        root.addView(ui.rowOf(start, stop), ui.top(8));
+        start.setOnClickListener(v -> startRun(START_NORMAL, true));
+        stop.setOnClickListener(v -> stopRobot());
 
-        refreshButton.setOnClickListener(v -> loadPairedDevices());
-        connectButton.setOnClickListener(v -> connectSelectedDevice());
-        disconnectButton.setOnClickListener(v -> closeConnection());
-        return panel;
+        warningText = ui.label("", 13, Ui.WARNING);
+        warningText.setVisibility(View.GONE);
+        root.addView(warningText, ui.top(6));
+
+        root.addView(tabBar(), ui.top(10));
+        root.addView(ui.hairline());
+
+        pages.add(buildDrivePage());
+        pages.add(buildSensorsPage());
+        pages.add(buildMappingPage());
+        pages.add(buildJoystickPage());
+        pages.add(buildOdometryPage());
+        pages.add(buildLogPage());
+        pages.add(buildSettingsPage());
+        for (View page : pages) {
+            root.addView(page, ui.top(4));
+        }
+        setContentView(scroll);
     }
 
-    private LinearLayout tabRow() {
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.VERTICAL);
-        tabs.setPadding(0, dp(8), 0, dp(8));
-
-        LinearLayout topRow = row();
-        LinearLayout bottomRow = row();
-        driveTabButton = button("Drive");
-        mappingTabButton = button("Mapping");
-        joystickTabButton = button("Joystick");
-        odometryTabButton = button("Odometry");
-        debugTabButton = button("Debug");
-        topRow.addView(driveTabButton, weightWrap());
-        topRow.addView(mappingTabButton, weightWrap());
-        topRow.addView(joystickTabButton, weightWrap());
-        bottomRow.addView(odometryTabButton, weightWrap());
-        bottomRow.addView(debugTabButton, weightWrap());
-        tabs.addView(topRow, matchWrap());
-        tabs.addView(bottomRow, matchWrap());
-
-        driveTabButton.setOnClickListener(v -> selectTab(TAB_DRIVE));
-        mappingTabButton.setOnClickListener(v -> selectTab(TAB_MAPPING));
-        joystickTabButton.setOnClickListener(v -> selectTab(TAB_JOYSTICK));
-        odometryTabButton.setOnClickListener(v -> selectTab(TAB_ODOMETRY));
-        debugTabButton.setOnClickListener(v -> selectTab(TAB_DEBUG));
-        return tabs;
+    private WindowInsets applySystemInsets(View view, WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= 35) {
+            android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars()
+                    | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+        }
+        return insets;
     }
 
-    private void buildDrivePage(LinearLayout root) {
-        LinearLayout lipoRow = row();
-        TextView lipoLabel = blockLabel("LiPo");
-        voltageText = blockValue("Voltage");
-        lipoRow.addView(lipoLabel, new LinearLayout.LayoutParams(0, dp(58), 1.0f));
-        lipoRow.addView(voltageText, new LinearLayout.LayoutParams(0, dp(58), 1.0f));
-        root.addView(lipoRow, matchWrap());
-
-        LinearLayout driveRow = row();
-        Button normalModeButton = button("Normal mode");
-        Button startButton = primaryButton("Start", GREEN);
-        Button stopButton = primaryButton("STOP", RED);
-        driveRow.addView(normalModeButton, weightWrap());
-        driveRow.addView(startButton, weightWrap());
-        driveRow.addView(stopButton, weightWrap());
-        root.addView(driveRow);
-
-        normalModeButton.setOnClickListener(v -> sendCommand("Mode", "P"));
-        startButton.setOnClickListener(v -> startNormalDrive());
-        stopButton.setOnClickListener(v -> stopRobot());
-
-        root.addView(tireCleaningPanel(), matchWrap());
-        root.addView(presetPanel(), matchWrap());
-
-        LinearLayout fieldsPanel = new LinearLayout(this);
-        fieldsPanel.setOrientation(LinearLayout.VERTICAL);
-        root.addView(fieldsPanel, matchWrap());
-
-        addField(fieldsPanel, "Turbine_Speed", "Turbine\nSpeed", "0");
-        addField(fieldsPanel, "Treshold", "Treshold", "3300");
-        addField(fieldsPanel, "Kp", "Kp", "0.015");
-        addField(fieldsPanel, "Kd", "Kd", "0.55");
-        addField(fieldsPanel, "Base_speed", "Base speed", "125");
-        addField(fieldsPanel, "Max_speed", "Max speed", "200");
-        addField(fieldsPanel, "Sharp_bend_speed_right", "Sharp Bend\nR", "-75");
-        addField(fieldsPanel, "Sharp_bend_speed_left", "Sharp Bend\nL", "120");
-        addField(fieldsPanel, "Bend_speed_right", "Base Bend\nR", "-75");
-        addField(fieldsPanel, "Bend_speed_left", "Base Bend\nL", "120");
-        addField(fieldsPanel, "Turbine_Prep_Time", "Turbine Prep\nTime", "0");
+    private View tabBar() {
+        HorizontalScrollView scroller = new HorizontalScrollView(this);
+        scroller.setHorizontalScrollBarEnabled(false);
+        LinearLayout bar = ui.row();
+        for (int i = 0; i < TAB_NAMES.length; i++) {
+            LinearLayout tab = ui.column();
+            TextView name = ui.label(TAB_NAMES[i], 15, Ui.MUTED);
+            name.setPadding(0, ui.dp(10), 0, ui.dp(9));
+            View underline = new View(this);
+            underline.setBackgroundColor(Ui.TEXT);
+            tab.addView(name, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            tab.addView(underline, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ui.dp(2)));
+            final int index = i;
+            tab.setOnClickListener(v -> selectTab(index));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, ui.dp(22), 0);
+            bar.addView(tab, lp);
+            tabViews.add(tab);
+            tabLabels.add(name);
+            tabUnderlines.add(underline);
+        }
+        scroller.addView(bar);
+        return scroller;
     }
 
-    private LinearLayout tireCleaningPanel() {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle("Czyszczenie opon"), matchWrap());
-        cleanSpeedInput = smallInput("170");
+    private boolean tabAvailable(int tab) {
+        if (tab == TAB_MAPPING) {
+            return profile.routeMap || profile.speedMap;
+        }
+        if (tab == TAB_ODOMETRY) {
+            return profile.odometry;
+        }
+        return tab >= 0 && tab < pages.size();
+    }
 
-        LinearLayout controls = row();
-        controls.addView(labeledInput("Speed", cleanSpeedInput),
-                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.9f));
-        Button cleanButton = primaryButton("Hold to clean", AMBER);
-        controls.addView(cleanButton, new LinearLayout.LayoutParams(0, dp(76), 1.1f));
-        panel.addView(controls, matchWrap());
+    private void selectTab(int tab) {
+        if (!tabAvailable(tab)) {
+            tab = TAB_DRIVE;
+        }
+        currentTab = tab;
+        for (int i = 0; i < pages.size(); i++) {
+            boolean selected = i == tab;
+            pages.get(i).setVisibility(selected ? View.VISIBLE : View.GONE);
+            tabLabels.get(i).setTextColor(selected ? Ui.TEXT : Ui.MUTED);
+            tabUnderlines.get(i).setVisibility(selected ? View.VISIBLE : View.INVISIBLE);
+        }
+        prefs().edit().putInt("tab", tab).apply();
+        updateTelemetry();
+    }
 
-        cleanButton.setOnTouchListener((view, event) -> {
-            int action = event.getActionMasked();
-            if (action == MotionEvent.ACTION_DOWN) {
-                view.setAlpha(0.72f);
-                sendTireCleanStart();
-                return true;
-            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                view.setAlpha(1.0f);
-                sendTireCleanStop();
-                return true;
+    // ------------------------------------------------------------------ parameters
+
+    private Param param(String key, String label, String def, int group) {
+        return param(key, label, def, def, group);
+    }
+
+    private Param param(String key, String label, String def, String reginDef, int group) {
+        Param p = new Param(key, label, def, reginDef, group);
+        params.add(p);
+        return p;
+    }
+
+    private View pair(Param a, Param b) {
+        View left = ui.labeled(a.label, a.input);
+        a.view = left;
+        View right;
+        if (b != null) {
+            right = ui.labeled(b.label, b.input);
+            b.view = right;
+        } else {
+            right = new View(this);
+        }
+        return ui.rowOf(left, right);
+    }
+
+    private List<String> commandsFor(int... groups) {
+        ArrayList<String> commands = new ArrayList<>();
+        for (Param p : params) {
+            for (int g : groups) {
+                if (p.group == g && !p.value().isEmpty()) {
+                    commands.add(p.key + "=" + p.value());
+                }
             }
-            return true;
-        });
-        return panel;
+        }
+        return commands;
     }
 
-    private LinearLayout presetPanel() {
-        LinearLayout presetPanel = panel();
-        presetNameInput = input("Preset name");
-        presetPanel.addView(presetNameInput, matchWrap());
+    /** Drive values the connected robot understands. */
+    private List<String> driveCommands() {
+        ArrayList<Integer> groups = new ArrayList<>();
+        groups.add(G_COMMON);
+        if (profile.turbine) {
+            groups.add(G_TURBINE);
+        }
+        if (profile.cornerOptions) {
+            groups.add(G_CORNER);
+        }
+        if (profile.speedMap) {
+            groups.add(G_ODOM);
+        }
+        int[] array = new int[groups.size()];
+        for (int i = 0; i < array.length; i++) {
+            array[i] = groups.get(i);
+        }
+        return commandsFor(array);
+    }
 
+    private String prefKey(Param p) {
+        return "p." + profile.key + "." + p.key;
+    }
+
+    private void loadParams() {
+        SharedPreferences store = prefs();
+        for (Param p : params) {
+            String def = "regin".equals(profile.key) ? p.reginDef : p.def;
+            p.input.setText(store.getString(prefKey(p), def));
+        }
+        btNameInput.setText(store.getString("bt.name." + profile.key, profile.title.replace(' ', '_')));
+        updateThreshold();
+    }
+
+    private void saveParams() {
+        SharedPreferences.Editor editor = prefs().edit();
+        for (Param p : params) {
+            editor.putString(prefKey(p), p.input.getText().toString().trim());
+        }
+        editor.putString("bt.name." + profile.key, btNameInput.getText().toString().trim());
+        editor.apply();
+    }
+
+    // ------------------------------------------------------------------ drive page
+
+    private View buildDrivePage() {
+        LinearLayout page = ui.column();
+
+        LinearLayout turbine = ui.column();
+        turbine.addView(ui.section("Turbine"), ui.matchWrap());
+        turbine.addView(pair(param("Turbine_Speed", "Speed, 0-1000", "100", G_TURBINE),
+                param("Turbine_Prep_Time", "Spin-up, ms", "1000", G_TURBINE)), ui.matchWrap());
+        turbineSection = turbine;
+        page.addView(turbine, ui.matchWrap());
+
+        page.addView(ui.section("PID"), ui.matchWrap());
+        page.addView(pair(param("Kp", "Kp", "0.015", G_COMMON), param("Kd", "Kd", "0.55", G_COMMON)), ui.matchWrap());
+        Param threshold = param("Treshold", "Threshold", "3300", "3700", G_COMMON);
+        page.addView(pair(threshold, null), ui.matchWrap());
+        threshold.input.addTextChangedListener(new Watcher(this::updateThreshold));
+
+        page.addView(ui.section("Speed"), ui.matchWrap());
+        page.addView(pair(param("Base_speed", "Base", "125", G_COMMON), param("Max_speed", "Max", "200", G_COMMON)),
+                ui.matchWrap());
+        page.addView(pair(param("Sharp_bend_speed_left", "Sharp bend left", "120", G_COMMON),
+                param("Sharp_bend_speed_right", "Sharp bend right", "-75", G_COMMON)), ui.matchWrap());
+        page.addView(pair(param("Bend_speed_left", "Bend left", "120", G_COMMON),
+                param("Bend_speed_right", "Bend right", "-75", G_COMMON)), ui.matchWrap());
+
+        LinearLayout corner = ui.column();
+        corner.addView(ui.section("Corners"), ui.matchWrap());
+        corner.addView(pair(param("ErrSlow", "Error slowdown, 0-1", "0", G_CORNER),
+                param("DWin", "D window, cycles", "1", G_CORNER)), ui.matchWrap());
+        corner.addView(pair(param("CornerLatch", "Corner latch, 0 / 1", "0", G_CORNER),
+                param("CornerIn", "Latch at error", "5000", G_CORNER)), ui.matchWrap());
+        corner.addView(pair(param("CornerOut", "Release below error", "1500", G_CORNER), null), ui.matchWrap());
+        corner.addView(ui.hint("Error slowdown cuts the base speed by slowdown x (error / 5500)². "
+                + "Corner latch pivots with the sharp bend speeds from Latch at error until the line is back "
+                + "below Release. D window takes D over that many 0.5 ms cycles."), ui.matchWrap());
+        cornerSection = corner;
+        page.addView(corner, ui.matchWrap());
+
+        Button send = ui.button("Send values", Ui.STYLE_QUIET);
+        page.addView(send, ui.top(12));
+        send.setOnClickListener(v -> {
+            if (requireConnected()) {
+                for (String command : driveCommands()) {
+                    link.send(command);
+                }
+            }
+        });
+
+        page.addView(ui.section("Presets"), ui.matchWrap());
         presetSpinner = new Spinner(this);
-        presetPanel.addView(presetSpinner, matchWrap());
+        page.addView(presetSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ui.dp(48)));
+        presetSpinner.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                presetTouched = true;
+            }
+            return false;
+        });
         presetSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position >= 0 && position < presetNames.size()) {
+                if (presetTouched && position >= 0 && position < presetNames.size()) {
                     loadPreset(presetNames.get(position));
+                }
+                presetTouched = false;
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        LinearLayout presetRow = ui.row();
+        presetNameInput = ui.input("Name");
+        Button save = ui.button("Save", Ui.STYLE_QUIET);
+        Button delete = ui.button("Delete", Ui.STYLE_QUIET);
+        presetRow.addView(presetNameInput, new LinearLayout.LayoutParams(0, ui.dp(48), 1f));
+        presetRow.addView(save, fixed(88));
+        presetRow.addView(delete, fixed(88));
+        page.addView(presetRow, ui.top(8));
+        save.setOnClickListener(v -> saveCurrentPreset());
+        delete.setOnClickListener(v -> deleteSelectedPreset());
+
+        page.addView(ui.section("Tire cleaning"), ui.matchWrap());
+        cleanSpeed = param("CleanSpeed", "Speed", "170", G_LOCAL);
+        Button clean = ui.button("Hold to clean", Ui.STYLE_QUIET);
+        LinearLayout cleanRow = ui.row();
+        cleanRow.setGravity(Gravity.BOTTOM);
+        cleanRow.addView(ui.labeled("Speed", cleanSpeed.input), new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams cleanParams = new LinearLayout.LayoutParams(0, ui.dp(48), 1f);
+        cleanParams.setMargins(ui.dp(8), 0, 0, 0);
+        cleanRow.addView(clean, cleanParams);
+        page.addView(cleanRow, ui.matchWrap());
+        clean.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                view.setPressed(true);
+                if (requireConnected()) {
+                    link.send("CleanSpeed=" + cleanSpeed.value());
+                    link.send("Clean=1");
+                }
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                view.setPressed(false);
+                link.send("Clean=0");
+            }
+            return true;
+        });
+        return page;
+    }
+
+    private LinearLayout.LayoutParams fixed(int widthDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ui.dp(widthDp), ui.dp(48));
+        lp.setMargins(ui.dp(8), 0, 0, 0);
+        return lp;
+    }
+
+    private void updateThreshold() {
+        for (Param p : params) {
+            if ("Treshold".equals(p.key) && sensorBars != null) {
+                sensorBars.setThreshold(p.floatValue(3300));
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ sensors page
+
+    private View buildSensorsPage() {
+        LinearLayout page = ui.column();
+        sensorStreamButton = ui.button("Pause", Ui.STYLE_QUIET);
+        page.addView(sensorStreamButton, ui.top(12));
+        sensorStreamButton.setOnClickListener(v -> {
+            streamPaused = !streamPaused;
+            sensorStreamButton.setText(streamPaused ? "Resume" : "Pause");
+            updateTelemetry();
+        });
+
+        sensorBars = new SensorBarsView(this);
+        page.addView(sensorBars, ui.sized(280, 16));
+
+        sensorErrorText = ui.readoutValue("-");
+        sensorPositionText = ui.readoutValue("-");
+        LinearLayout readouts = ui.rowOf(ui.readout("Error", sensorErrorText),
+                ui.readout("Position / centre", sensorPositionText));
+        page.addView(readouts, ui.top(12));
+
+        sensorSummaryText = ui.mono("No data", 14, Ui.MUTED);
+        page.addView(sensorSummaryText, ui.top(10));
+        page.addView(ui.hint("Bars from the robot's left to right, dashed line is the threshold, the tick under "
+                + "the bars is the centre. Error = centre - position, plus means the line is right of the centre."),
+                ui.matchWrap());
+        return page;
+    }
+
+    // ------------------------------------------------------------------ mapping page
+
+    private View buildMappingPage() {
+        LinearLayout page = ui.column();
+
+        trackView = new TrackView(this);
+        trackView.setSpeedMap(speedMap);
+        page.addView(trackView, ui.sized(320, 12));
+
+        mapStatusText = ui.label("", 13, Ui.MUTED);
+        page.addView(mapStatusText, ui.top(8));
+        transferText = ui.label("", 13, Ui.MUTED);
+        page.addView(transferText, ui.top(2));
+
+        liveSpeedText = ui.readoutValue("-");
+        liveTargetText = ui.readoutValue("-");
+        liveLapText = ui.readoutValue("-");
+        liveSyncText = ui.readoutValue("-");
+        LinearLayout readouts = ui.rowOf(ui.readout("Speed", liveSpeedText), ui.readout("Target", liveTargetText),
+                ui.readout("Lap", liveLapText), ui.readout("Sync, mm", liveSyncText));
+        liveReadouts = readouts;
+        page.addView(readouts, ui.top(10));
+
+        Button startMapping = ui.button("Start mapping", Ui.STYLE_QUIET);
+        speedRunButton = ui.button("Speed run", Ui.STYLE_PRIMARY);
+        Button stop = ui.button("Stop", Ui.STYLE_DANGER);
+        page.addView(ui.rowOf(startMapping, speedRunButton, stop), ui.top(12));
+        startMapping.setOnClickListener(v -> startMapping());
+        speedRunButton.setOnClickListener(v -> startRun(START_SPEED, true));
+        stop.setOnClickListener(v -> stopRobot());
+
+        gyroText = ui.label("", 13, Ui.TEXT);
+        Button applyGyro = ui.button("Apply", Ui.STYLE_QUIET);
+        LinearLayout gyro = ui.row();
+        gyro.addView(gyroText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        gyro.addView(applyGyro, fixed(96));
+        gyroRow = gyro;
+        gyroRow.setVisibility(View.GONE);
+        page.addView(gyro, ui.top(8));
+        applyGyro.setOnClickListener(v -> applyGyroSuggestion());
+
+        // speed map
+        LinearLayout speed = ui.column();
+        speed.addView(ui.section("Speed map"), ui.matchWrap());
+        Button download = ui.button("Get speed map", Ui.STYLE_QUIET);
+        Button sendProfile = ui.button("Send profile", Ui.STYLE_QUIET);
+        speed.addView(ui.rowOf(download, sendProfile), ui.top(4));
+        download.setOnClickListener(v -> requestSpeedMap());
+        sendProfile.setOnClickListener(v -> {
+            if (requireConnected()) {
+                for (String c : commandsFor(G_SPEED)) {
+                    link.send(c);
+                }
+                link.send("SpeedMapBuild=1");
+            }
+        });
+
+        profileView = new SpeedProfileView(this);
+        profileView.setModel(speedMap);
+        speed.addView(profileView, ui.sized(180, 12));
+
+        Watcher profileWatcher = new Watcher(() -> {
+            main.removeCallbacks(rebuildProfile);
+            main.postDelayed(rebuildProfile, 250);
+        });
+        Param[] sp = {
+                param("SmVmax", "Max speed, m/s", "2.5", G_SPEED),
+                param("SmVmin", "Min speed, m/s", "0.8", G_SPEED),
+                param("SmAcc", "Acceleration, m/s²", "6", G_SPEED),
+                param("SmBrake", "Braking, m/s²", "8", G_SPEED),
+                param("SmLat", "Corner grip, m/s²", "7", G_SPEED),
+                param("SmLag", "Response lag, ms", "60", G_SPEED),
+                param("SmWin", "Curvature window, cm", "10", G_SPEED),
+                param("SmLaps", "Laps, 0 = no stop", "0", G_SPEED),
+                param("SmKp", "Speed Kp, PWM per m/s", "120", G_SPEED),
+                param("SmFF", "Feed-forward, 0 = learned", "0", G_SPEED),
+        };
+        for (int i = 0; i < sp.length; i += 2) {
+            speed.addView(pair(sp[i], sp[i + 1]), ui.matchWrap());
+            sp[i].input.addTextChangedListener(profileWatcher);
+            sp[i + 1].input.addTextChangedListener(profileWatcher);
+        }
+        speed.addView(ui.hint("The robot follows the line with the normal PID, only the base speed comes from "
+                + "the map. Corner speed = √(grip / curvature). Braking sets how early it slows down before "
+                + "a corner, acceleration how fast it speeds up after one. Driven distance re-syncs on every "
+                + "corner exit."), ui.matchWrap());
+
+        speed.addView(ui.section("Odometry"), ui.matchWrap());
+        gyroScale = param("GyroScale", "Gyro scale", "1.0", G_ODOM);
+        speed.addView(pair(gyroScale, param("GyroWeight", "Gyro weight, 0-1", "1.0", G_ODOM)), ui.matchWrap());
+        speed.addView(ui.hint("A closed mapping lap suggests a gyro scale, apply it and map again."),
+                ui.matchWrap());
+        speedMapSection = speed;
+        page.addView(speed, ui.matchWrap());
+
+        // legacy odometry route
+        LinearLayout route = ui.column();
+        route.addView(ui.section("Odometry route"), ui.matchWrap());
+        routeInfoText = ui.label("", 13, Ui.MUTED);
+        route.addView(routeInfoText, ui.top(2));
+        Button getRecorded = ui.button("Get GRUZIK.txt", Ui.STYLE_QUIET);
+        Button getRobotMap = ui.button("Get map.txt", Ui.STYLE_QUIET);
+        route.addView(ui.rowOf(getRecorded, getRobotMap), ui.top(8));
+        getRecorded.setOnClickListener(v -> {
+            if (requireConnected()) {
+                link.send("MapDump=recorded");
+            }
+        });
+        getRobotMap.setOnClickListener(v -> {
+            if (requireConnected()) {
+                link.send("MapDump=optimized");
+            }
+        });
+        optStep = param("opt.step", "Point step", "80", G_LOCAL);
+        optSmooth = param("opt.smooth", "Smoothing", "5", G_LOCAL);
+        optBase = param("opt.base", "Base speed", "40", G_LOCAL);
+        optGain = param("opt.gain", "Gain", "60", G_LOCAL);
+        optMin = param("opt.min", "Min speed", "35", G_LOCAL);
+        optMax = param("opt.max", "Max speed", "95", G_LOCAL);
+        route.addView(pair(optStep, optSmooth), ui.matchWrap());
+        route.addView(pair(optBase, optGain), ui.matchWrap());
+        route.addView(pair(optMin, optMax), ui.matchWrap());
+        route.addView(pair(param("MapP", "MapP", "90", G_ROUTE), param("MapI", "MapI", "0", G_ROUTE)), ui.matchWrap());
+        route.addView(pair(param("MapD", "MapD", "10", G_ROUTE), param("MapSpeed", "Default speed", "80", G_ROUTE)),
+                ui.matchWrap());
+        Button optimize = ui.button("Optimize", Ui.STYLE_QUIET);
+        Button upload = ui.button("Upload", Ui.STYLE_QUIET);
+        Button runRoute = ui.button("Run route", Ui.STYLE_QUIET);
+        route.addView(ui.rowOf(optimize, upload, runRoute), ui.top(12));
+        optimize.setOnClickListener(v -> optimizeRoute(true));
+        upload.setOnClickListener(v -> {
+            if (optimizedRoute.isEmpty() && !optimizeRoute(true)) {
+                return;
+            }
+            uploadRoute();
+        });
+        runRoute.setOnClickListener(v -> runRoute());
+        Button clearView = ui.button("Clear view", Ui.STYLE_QUIET);
+        route.addView(clearView, ui.top(8));
+        clearView.setOnClickListener(v -> {
+            recordedRoute.clear();
+            optimizedRoute.clear();
+            robotRoute.clear();
+            trackView.clearTrail();
+            updateRouteUi();
+        });
+        routeSection = route;
+        page.addView(route, ui.matchWrap());
+        return page;
+    }
+
+    // ------------------------------------------------------------------ joystick, odometry, log, settings
+
+    private View buildJoystickPage() {
+        LinearLayout page = ui.column();
+        joystickSpeed = param("joystick.speed", "Max PWM", "85", G_LOCAL);
+        Button stop = ui.button("Stop", Ui.STYLE_DANGER);
+        LinearLayout row = ui.row();
+        row.setGravity(Gravity.BOTTOM);
+        row.addView(ui.labeled("Max PWM", joystickSpeed.input), new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(0, ui.dp(48), 1f);
+        stopParams.setMargins(ui.dp(8), 0, 0, 0);
+        row.addView(stop, stopParams);
+        page.addView(row, ui.top(12));
+
+        JoystickView joystick = new JoystickView(this);
+        page.addView(joystick, ui.sized(300, 12));
+        joystickStatus = ui.mono("L 0   R 0", 14, Ui.MUTED);
+        joystickStatus.setGravity(Gravity.CENTER);
+        page.addView(joystickStatus, ui.top(8));
+        joystick.setListener((forward, turn, active) -> sendManual(forward, turn, !active));
+        stop.setOnClickListener(v -> sendManual(0, 0, true));
+        return page;
+    }
+
+    private View buildOdometryPage() {
+        LinearLayout page = ui.column();
+        odomX = ui.readoutValue("-");
+        odomY = ui.readoutValue("-");
+        odomYaw = ui.readoutValue("-");
+        odomDistance = ui.readoutValue("-");
+        odomWheels = ui.readoutValue("-");
+        odomGyro = ui.readoutValue("-");
+        odomFusion = ui.mono("-", 14, Ui.TEXT);
+        page.addView(ui.rowOf(ui.readout("X, m", odomX), ui.readout("Y, m", odomY)), ui.top(12));
+        page.addView(ui.rowOf(ui.readout("Yaw, deg", odomYaw), ui.readout("Distance, m", odomDistance)), ui.top(12));
+        page.addView(ui.rowOf(ui.readout("Wheels L / R, m/s", odomWheels), ui.readout("Gyro Z, dps", odomGyro)),
+                ui.top(12));
+        page.addView(ui.readout("Yaw from encoders / gyro, deg", odomFusion), ui.top(12));
+        page.addView(ui.hint("Pose is integrated while the robot drives. Encoder yaw drifting away from gyro yaw "
+                + "shows wheel slip."), ui.matchWrap());
+        return page;
+    }
+
+    private View buildLogPage() {
+        LinearLayout page = ui.column();
+        Button clear = ui.button("Clear", Ui.STYLE_QUIET);
+        page.addView(clear, ui.top(12));
+        logText = ui.mono("", 12, Ui.TEXT);
+        logText.setTextIsSelectable(true);
+        page.addView(logText, ui.top(10));
+        clear.setOnClickListener(v -> {
+            logBuffer.setLength(0);
+            logText.setText("");
+        });
+        return page;
+    }
+
+    private View buildSettingsPage() {
+        LinearLayout page = ui.column();
+        page.addView(ui.section("Robot"), ui.matchWrap());
+        robotTypeSpinner = new Spinner(this);
+        robotTypeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+                RobotProfile.OVERRIDE_NAMES));
+        robotTypeSpinner.setSelection(prefs().getInt("robot.override", RobotProfile.AUTO));
+        page.addView(robotTypeSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                ui.dp(48)));
+        robotTypeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position != prefs().getInt("robot.override", RobotProfile.AUTO)) {
+                    prefs().edit().putInt("robot.override", position).apply();
+                    RobotProfile forced = RobotProfile.forOverride(position);
+                    if (forced != null) {
+                        switchProfile(forced);
+                    } else if (link.isConnected()) {
+                        link.send("Info=1");
+                    }
                 }
             }
 
@@ -380,670 +838,320 @@ public class MainActivity extends Activity {
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
+        page.addView(ui.hint("Auto asks the firmware (Info) and falls back to the Bluetooth name."),
+                ui.matchWrap());
 
-        LinearLayout presetRow = row();
-        Button savePresetButton = button("Save");
-        Button deletePresetButton = button("Delete");
-        Button sendPresetButton = button("Send values");
-        presetRow.addView(savePresetButton, weightWrap());
-        presetRow.addView(deletePresetButton, weightWrap());
-        presetRow.addView(sendPresetButton, weightWrap());
-        presetPanel.addView(presetRow);
-
-        savePresetButton.setOnClickListener(v -> saveCurrentPreset());
-        deletePresetButton.setOnClickListener(v -> deleteSelectedPreset());
-        sendPresetButton.setOnClickListener(v -> sendPresetValuesAsync());
-        return presetPanel;
-    }
-
-    private void buildMappingPage(LinearLayout root) {
-        routeInfoText = label("", 14, MUTED);
-        transferText = label("BT map transfer idle", 13, MUTED);
-        root.addView(routeInfoText, matchWrap());
-        root.addView(transferText, matchWrap());
-
-        routeMapView = new RouteMapView(this);
-        LinearLayout.LayoutParams mapParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(300));
-        mapParams.setMargins(0, dp(6), 0, dp(8));
-        root.addView(routeMapView, mapParams);
-
-        LinearLayout modePanel = panel();
-        TextView modeTitle = sectionTitle("Tryby robota");
-        modePanel.addView(modeTitle, matchWrap());
-        LinearLayout modeRow = row();
-        Button normalButton = button("Normal");
-        Button mappingButton = button("Mapping");
-        Button playbackButton = button("Playback");
-        modeRow.addView(normalButton, weightWrap());
-        modeRow.addView(mappingButton, weightWrap());
-        modeRow.addView(playbackButton, weightWrap());
-        modePanel.addView(modeRow);
-
-        LinearLayout actionRow = row();
-        Button startMappingButton = primaryButton("Start map", ACCENT);
-        Button playbackStartButton = primaryButton("Run map", GREEN);
-        Button stopButton = primaryButton("STOP", RED);
-        actionRow.addView(startMappingButton, weightWrap());
-        actionRow.addView(playbackStartButton, weightWrap());
-        actionRow.addView(stopButton, weightWrap());
-        modePanel.addView(actionRow);
-        root.addView(modePanel, matchWrap());
-
-        normalButton.setOnClickListener(v -> sendCommand("Mode", "P"));
-        mappingButton.setOnClickListener(v -> sendCommand("Mode", "M"));
-        playbackButton.setOnClickListener(v -> sendCommand("Mode", "U"));
-        startMappingButton.setOnClickListener(v -> startMappingRun());
-        playbackStartButton.setOnClickListener(v -> startPlaybackRun());
-        stopButton.setOnClickListener(v -> stopRobot());
-
-        root.addView(mapTransferPanel(), matchWrap());
-        root.addView(optimizationPanel(), matchWrap());
-        root.addView(mapControllerPanel(), matchWrap());
-    }
-
-    private LinearLayout mapTransferPanel() {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle("Mapa z robota"), matchWrap());
-        LinearLayout row1 = row();
-        Button downloadRecorded = button("Get saved");
-        Button downloadRobotMap = button("Get map.txt");
-        Button clearButton = button("Clear view");
-        row1.addView(downloadRecorded, weightWrap());
-        row1.addView(downloadRobotMap, weightWrap());
-        row1.addView(clearButton, weightWrap());
-        panel.addView(row1);
-
-        downloadRecorded.setOnClickListener(v -> sendCommand("MapDump", "recorded"));
-        downloadRobotMap.setOnClickListener(v -> sendCommand("MapDump", "optimized"));
-        clearButton.setOnClickListener(v -> {
-            recordedRoute.clear();
-            optimizedRoute.clear();
-            robotOptimizedRoute.clear();
-            updateRouteUi();
-        });
-        return panel;
-    }
-
-    private LinearLayout optimizationPanel() {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle("Optymalizacja"), matchWrap());
-
-        optStepInput = smallInput("80");
-        optSmoothInput = smallInput("5");
-        optBaseSpeedInput = smallInput("40");
-        optGainInput = smallInput("60");
-        optMinSpeedInput = smallInput("35");
-        optMaxSpeedInput = smallInput("95");
-
-        panel.addView(twoInputs("Point step", optStepInput, "Smoothing", optSmoothInput));
-        panel.addView(twoInputs("Base speed", optBaseSpeedInput, "Gain", optGainInput));
-        panel.addView(twoInputs("Min speed", optMinSpeedInput, "Max speed", optMaxSpeedInput));
-
-        LinearLayout row = row();
-        Button optimizeButton = primaryButton("Optimize", ACCENT);
-        Button uploadButton = primaryButton("Upload map.txt", AMBER);
-        Button saveButton = button("Save settings");
-        row.addView(optimizeButton, weightWrap());
-        row.addView(uploadButton, weightWrap());
-        row.addView(saveButton, weightWrap());
-        panel.addView(row);
-
-        optimizeButton.setOnClickListener(v -> optimizeRecordedRoute());
-        uploadButton.setOnClickListener(v -> uploadOptimizedRoute());
-        saveButton.setOnClickListener(v -> {
-            saveMappingSettings();
-            toast("Mapping settings saved");
-        });
-        return panel;
-    }
-
-    private LinearLayout mapControllerPanel() {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle("Kontroler odtwarzania"), matchWrap());
-        mapPInput = smallInput("90");
-        mapIInput = smallInput("0");
-        mapDInput = smallInput("10");
-        mapSpeedInput = smallInput("80");
-        panel.addView(twoInputs("MapP", mapPInput, "MapI", mapIInput));
-        panel.addView(twoInputs("MapD", mapDInput, "Default speed", mapSpeedInput));
-        LinearLayout row = row();
-        Button sendButton = button("Send map controller");
-        Button saveButton = button("Save settings");
-        row.addView(sendButton, weightWrap());
-        row.addView(saveButton, weightWrap());
-        panel.addView(row, matchWrap());
-        sendButton.setOnClickListener(v -> new Thread(this::sendMappingControllerValuesBlocking).start());
-        saveButton.setOnClickListener(v -> {
-            saveMappingSettings();
-            toast("Mapping settings saved");
-        });
-        return panel;
-    }
-
-    private void buildJoystickPage(LinearLayout root) {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle("Joystick"), matchWrap());
-
-        joystickSpeedInput = smallInput("85");
-        joystickStatusText = telemetryText("L 0   R 0");
-        Button stopButton = primaryButton("STOP manual", RED);
-
-        LinearLayout settingsRow = row();
-        settingsRow.addView(labeledInput("Max PWM", joystickSpeedInput),
-                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        settingsRow.addView(stopButton, new LinearLayout.LayoutParams(0, dp(76), 1.0f));
-        panel.addView(settingsRow, matchWrap());
-
-        JoystickView joystick = new JoystickView(this);
-        LinearLayout.LayoutParams joystickParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(290));
-        joystickParams.setMargins(0, dp(8), 0, dp(8));
-        panel.addView(joystick, joystickParams);
-        panel.addView(joystickStatusText, matchWrap());
-        root.addView(panel, matchWrap());
-
-        joystick.setListener((forward, turn, active) -> sendManualDrive(forward, turn, !active));
-        stopButton.setOnClickListener(v -> sendManualStop());
-    }
-
-    private void buildOdometryPage(LinearLayout root) {
-        LinearLayout controlPanel = panel();
-        controlPanel.addView(sectionTitle("Odometry"), matchWrap());
-        LinearLayout row = row();
-        Button startButton = primaryButton("Start odom", ACCENT);
-        Button debugButton = button("Debug tab");
-        Button stopButton = primaryButton("Stop stream", RED);
-        row.addView(startButton, weightWrap());
-        row.addView(debugButton, weightWrap());
-        row.addView(stopButton, weightWrap());
-        controlPanel.addView(row);
-        root.addView(controlPanel, matchWrap());
-
-        odomXText = blockValue("0.000 m");
-        odomYText = blockValue("0.000 m");
-        odomYawText = blockValue("0.0 deg");
-        odomDistanceText = blockValue("0.000 m");
-        odomSpeedText = telemetryText("L 0.000 / R 0.000 m/s");
-        odomGyroText = blockValue("0.00 dps");
-        odomFusionText = telemetryText("enc 0.0 deg / gyro 0.0 deg");
-
-        root.addView(twoReadouts("X", odomXText, "Y", odomYText), matchWrap());
-        root.addView(twoReadouts("Yaw", odomYawText, "Distance", odomDistanceText), matchWrap());
-        root.addView(readoutPanel("Wheel speed", odomSpeedText), matchWrap());
-        root.addView(twoReadouts("Gyro Z", odomGyroText, "Fusion", odomFusionText), matchWrap());
-
-        startButton.setOnClickListener(v -> sendCommand("Telemetry", "odom"));
-        debugButton.setOnClickListener(v -> selectTab(TAB_DEBUG));
-        stopButton.setOnClickListener(v -> sendCommand("Telemetry", "off"));
-    }
-
-    private LinearLayout bluetoothNamePanel() {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle("Bluetooth name"), matchWrap());
-
-        btNameInput = input("GRUZIK4.0");
+        page.addView(ui.section("Bluetooth name"), ui.matchWrap());
+        LinearLayout nameRow = ui.row();
+        btNameInput = ui.input("Name");
         btNameInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
-        btNameStatusText = telemetryText("Save, reboot in KEY/AT mode, pair again");
-
-        LinearLayout inputRow = row();
-        inputRow.addView(labeledInput("Name", btNameInput),
-                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f));
-        Button saveButton = primaryButton("Save for KEY", ACCENT);
-        inputRow.addView(saveButton, new LinearLayout.LayoutParams(0, dp(76), 0.85f));
-        panel.addView(inputRow, matchWrap());
-
-        LinearLayout actionRow = row();
-        Button tryNowButton = button("Try AT now");
-        Button clearButton = button("Clear status");
-        actionRow.addView(tryNowButton, weightWrap());
-        actionRow.addView(clearButton, weightWrap());
-        panel.addView(actionRow, matchWrap());
-        panel.addView(btNameStatusText, matchWrap());
-
-        saveButton.setOnClickListener(v -> sendBluetoothName(false));
-        tryNowButton.setOnClickListener(v -> confirmBluetoothNameNow());
-        clearButton.setOnClickListener(v -> btNameStatusText.setText("Ready"));
-        return panel;
+        Button rename = ui.button("Rename", Ui.STYLE_QUIET);
+        nameRow.addView(btNameInput, new LinearLayout.LayoutParams(0, ui.dp(48), 1f));
+        nameRow.addView(rename, fixed(104));
+        page.addView(nameRow, ui.matchWrap());
+        page.addView(ui.hint("The module has to be in AT mode. Pair it again after renaming."), ui.matchWrap());
+        btNameStatus = ui.label("", 13, Ui.TEXT);
+        btNameStatus.setVisibility(View.GONE);
+        page.addView(btNameStatus, ui.top(6));
+        rename.setOnClickListener(v -> confirmRename());
+        return page;
     }
 
-    private void buildDebugPage(LinearLayout root) {
-        LinearLayout controlPanel = panel();
-        controlPanel.addView(sectionTitle("Debug"), matchWrap());
-        LinearLayout row = row();
-        Button debugStreamButton = primaryButton("Debug stream", ACCENT);
-        Button odomStreamButton = button("Odom stream");
-        Button stopButton = primaryButton("Stop stream", RED);
-        row.addView(debugStreamButton, weightWrap());
-        row.addView(odomStreamButton, weightWrap());
-        row.addView(stopButton, weightWrap());
-        controlPanel.addView(row);
-        root.addView(controlPanel, matchWrap());
-        root.addView(bluetoothNamePanel(), matchWrap());
+    // ================================================================== profile
 
-        debugLineSummaryText = telemetryText("Line sensors idle");
-        debugLineRawText = telemetryText("S01..S12: waiting");
-        debugEncoderText = telemetryText("Encoders waiting");
-        debugImuText = telemetryText("IMU waiting");
-
-        root.addView(readoutPanel("Line sensor", debugLineSummaryText), matchWrap());
-        root.addView(readoutPanel("Line raw ADC", debugLineRawText), matchWrap());
-        root.addView(readoutPanel("Encoders", debugEncoderText), matchWrap());
-        root.addView(readoutPanel("IMU", debugImuText), matchWrap());
-
-        debugStreamButton.setOnClickListener(v -> sendCommand("Telemetry", "debug"));
-        odomStreamButton.setOnClickListener(v -> sendCommand("Telemetry", "odom"));
-        stopButton.setOnClickListener(v -> sendCommand("Telemetry", "off"));
-    }
-
-    private void addField(LinearLayout parent, String key, String displayName, String defaultValue) {
-        LinearLayout row = row();
-        row.setPadding(0, dp(4), 0, dp(4));
-        TextView label = blockLabel(displayName);
-        EditText input = input(defaultValue);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        Button sendButton = button("Send");
-        sendButton.setOnClickListener(v -> sendCommand(key, input.getText().toString().trim()));
-        row.addView(label, new LinearLayout.LayoutParams(0, dp(62), 0.95f));
-        row.addView(input, new LinearLayout.LayoutParams(0, dp(62), 1.45f));
-        row.addView(sendButton, new LinearLayout.LayoutParams(0, dp(62), 0.8f));
-        parent.addView(row);
-        fields.put(key, input);
-    }
-
-    private void selectTab(int tab) {
-        drivePage.setVisibility(tab == TAB_DRIVE ? View.VISIBLE : View.GONE);
-        mappingPage.setVisibility(tab == TAB_MAPPING ? View.VISIBLE : View.GONE);
-        joystickPage.setVisibility(tab == TAB_JOYSTICK ? View.VISIBLE : View.GONE);
-        odometryPage.setVisibility(tab == TAB_ODOMETRY ? View.VISIBLE : View.GONE);
-        debugPage.setVisibility(tab == TAB_DEBUG ? View.VISIBLE : View.GONE);
-        driveTabButton.setBackground(buttonDrawable(tab == TAB_DRIVE ? ACCENT : SURFACE_2, tab == TAB_DRIVE ? ACCENT_PRESSED : SURFACE_PRESSED));
-        mappingTabButton.setBackground(buttonDrawable(tab == TAB_MAPPING ? ACCENT : SURFACE_2, tab == TAB_MAPPING ? ACCENT_PRESSED : SURFACE_PRESSED));
-        joystickTabButton.setBackground(buttonDrawable(tab == TAB_JOYSTICK ? ACCENT : SURFACE_2, tab == TAB_JOYSTICK ? ACCENT_PRESSED : SURFACE_PRESSED));
-        odometryTabButton.setBackground(buttonDrawable(tab == TAB_ODOMETRY ? ACCENT : SURFACE_2, tab == TAB_ODOMETRY ? ACCENT_PRESSED : SURFACE_PRESSED));
-        debugTabButton.setBackground(buttonDrawable(tab == TAB_DEBUG ? ACCENT : SURFACE_2, tab == TAB_DEBUG ? ACCENT_PRESSED : SURFACE_PRESSED));
-    }
-
-    private void requestBluetoothPermissionIfNeeded() {
-        ArrayList<String> permissions = missingBluetoothPermissions();
-        if (!permissions.isEmpty()) {
-            requestPermissions(permissions.toArray(new String[0]), REQUEST_BT_CONNECT);
+    private RobotProfile initialProfile() {
+        RobotProfile forced = RobotProfile.forOverride(prefs().getInt("robot.override", RobotProfile.AUTO));
+        if (forced != null) {
+            return forced;
         }
+        return "regin".equals(prefs().getString("last.profile", "gruzik"))
+                ? RobotProfile.regin()
+                : RobotProfile.gruzik(2, "odom|sd|map|speedmap|live|sensors|corner");
     }
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_BT_CONNECT) {
-            loadPairedDevices();
+    private void switchProfile(RobotProfile next) {
+        boolean sameKey = next.key.equals(profile.key);
+        if (!sameKey) {
+            saveParams();
         }
-    }
-
-    private boolean hasBtPermission() {
-        return missingBluetoothPermissions().isEmpty();
-    }
-
-    private ArrayList<String> missingBluetoothPermissions() {
-        ArrayList<String> permissions = new ArrayList<>();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
-            }
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.BLUETOOTH_SCAN);
-            }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
-            }
+        profile = next;
+        prefs().edit().putString("last.profile", profile.key).apply();
+        if (!sameKey) {
+            loadParams();
+            loadPresetNames();
         }
-        return permissions;
+        applyProfile();
     }
 
-    private void loadPairedDevices() {
-        pairedDevices.clear();
-        ArrayList<String> names = new ArrayList<>();
+    private void applyProfile() {
+        titleText.setText(link.isConnected() ? profile.title : profile.title + "  ·  not connected");
+        turbineSection.setVisibility(profile.turbine ? View.VISIBLE : View.GONE);
+        cornerSection.setVisibility(profile.cornerOptions ? View.VISIBLE : View.GONE);
+        speedMapSection.setVisibility(profile.speedMap ? View.VISIBLE : View.GONE);
+        speedRunButton.setVisibility(profile.speedMap ? View.VISIBLE : View.GONE);
+        liveReadouts.setVisibility(profile.speedMap ? View.VISIBLE : View.GONE);
+        routeSection.setVisibility(profile.routeMap ? View.VISIBLE : View.GONE);
+        sensorBars.setCount(profile.sensorCount);
+        sensorPositionText.setText("- / " + profile.centre());
+        for (int i = 0; i < tabViews.size(); i++) {
+            tabViews.get(i).setVisibility(tabAvailable(i) ? View.VISIBLE : View.GONE);
+        }
+        if (!tabAvailable(currentTab)) {
+            selectTab(TAB_DRIVE);
+        }
+        updateMapStatus();
+        updateRouteUi();
+    }
 
-        if (bluetoothAdapter == null) {
-            names.add("Bluetooth not available");
-            setDeviceAdapter(names);
+    // ================================================================== commands
+
+    private boolean requireConnected() {
+        if (!link.isConnected()) {
+            showWarning("Not connected");
+            return false;
+        }
+        return true;
+    }
+
+    private void startMapping() {
+        trackView.clearTrail();
+        profileView.clearTrace();
+        gyroRow.setVisibility(View.GONE);
+        autoDownloadSpeedMap = profile.speedMap;
+        transferText.setText("Mapping");
+        startRun(START_MAPPING, true);
+    }
+
+    /** Values, start command and the live stream, queued in that order. */
+    private void startRun(String startCommand, boolean live) {
+        if (!requireConnected()) {
             return;
         }
-        if (!hasBtPermission()) {
-            names.add("Bluetooth permission needed");
-            setDeviceAdapter(names);
-            setStatus("Bluetooth permission needed");
+        if (START_SPEED.equals(startCommand) && !profile.speedMap) {
+            showWarning("This firmware has no speed map");
             return;
         }
-        if (!bluetoothAdapter.isEnabled()) {
-            names.add("Enable Bluetooth first");
-            setDeviceAdapter(names);
-            return;
+        saveParams();
+        hideWarning();
+        List<String> commands = new ArrayList<>(driveCommands());
+        if (START_SPEED.equals(startCommand)) {
+            commands.addAll(commandsFor(G_SPEED));
+            profileView.clearTrace();
+        } else if (START_ROUTE.equals(startCommand)) {
+            commands.addAll(commandsFor(G_ROUTE));
+        }
+        if (!START_MAPPING.equals(startCommand)) {
+            trackView.clearTrail();
         }
 
-        try {
-            Set<BluetoothDevice> bondedDevices = bluetoothAdapter.getBondedDevices();
-            for (BluetoothDevice device : bondedDevices) {
-                pairedDevices.add(device);
-                String name = device.getName() == null ? "Unknown" : device.getName();
-                names.add(name + "  " + device.getAddress());
-            }
-        } catch (SecurityException ex) {
-            names.add("Bluetooth permission blocked");
-            setDeviceAdapter(names);
-            setStatus("Bluetooth permission blocked by Android");
-            showPermissionHelpIfNeeded();
-            return;
+        link.send("Telemetry=off");
+        for (String c : commands) {
+            link.send(c);
         }
-        if (names.isEmpty()) {
-            names.add("No paired devices");
+        link.pause(100);
+        link.send(startCommand + "=1");
+        boolean wantLive = live && profile.liveFrames && currentTab == TAB_MAPPING;
+        if (wantLive) {
+            link.pause(250);
+            link.send("Telemetry=live");
+            requestedTelemetry = "live";
         }
-        setDeviceAdapter(names);
+
+        final long requested = SystemClock.uptimeMillis();
+        String fallback = START_NORMAL.equals(startCommand) ? "P"
+                : START_MAPPING.equals(startCommand) ? "M"
+                : START_ROUTE.equals(startCommand) ? "U" : null;
+        if (fallback != null) {
+            long delay = commands.size() * 30L + 1200L;
+            main.postDelayed(() -> {
+                if (lastStartAckMs < requested && link.isConnected()) {
+                    // firmware without StartNormal / StartMapping / StartPlayback
+                    link.send("Mode=" + fallback);
+                    link.pause(120);
+                    link.send("Mode=Y");
+                }
+            }, delay);
+        }
     }
 
-    private void showPermissionHelpIfNeeded() {
-        if (hasBtPermission()) {
+    private void stopRobot() {
+        if (!requireConnected()) {
             return;
         }
+        link.send("Mode=N");
+        link.send("Manual=0,0");
+        link.send("Clean=0");
+        robotRunning = false;
+        main.postDelayed(this::updateTelemetry, 400);
+    }
 
+    private void sendManual(float forward, float turn, boolean force) {
+        int max = Math.max(0, Math.min(250, Math.round(joystickSpeed.floatValue(85))));
+        int left = Math.max(-250, Math.min(250, Math.round((forward + turn) * max)));
+        int right = Math.max(-250, Math.min(250, Math.round((forward - turn) * max)));
+        long now = SystemClock.uptimeMillis();
+        if (!force && (now - lastManualMs) < 70 && Math.abs(left - lastManualLeft) < 4
+                && Math.abs(right - lastManualRight) < 4) {
+            return;
+        }
+        lastManualMs = now;
+        lastManualLeft = left;
+        lastManualRight = right;
+        joystickStatus.setText(String.format(Locale.US, "L %d   R %d", left, right));
+        if (link.isConnected()) {
+            link.sendQuiet(String.format(Locale.US, "Manual=%d,%d", left, right));
+        }
+    }
+
+    /** One stream at a time, chosen by the open tab. 9600 baud is too slow for more. */
+    private void updateTelemetry() {
+        if (!link.isConnected()) {
+            requestedTelemetry = "off";
+            return;
+        }
+        String wanted = "off";
+        if (currentTab == TAB_SENSORS && !streamPaused) {
+            wanted = profile.sensorFrames ? "sensors" : "debug";
+        } else if (currentTab == TAB_MAPPING && robotRunning && profile.liveFrames) {
+            wanted = "live";
+        } else if (currentTab == TAB_ODOMETRY && profile.odometry) {
+            wanted = "odom";
+        }
+        if (!wanted.equals(requestedTelemetry)) {
+            requestedTelemetry = wanted;
+            link.send("Telemetry=" + wanted);
+        }
+        if (currentTab != TAB_SENSORS) {
+            sensorSummaryText.setText("No data");
+        }
+    }
+
+    private void requestSpeedMap() {
+        if (!requireConnected()) {
+            return;
+        }
+        requestedTelemetry = "off";
+        transferText.setText("Downloading speed map");
+        link.send("SpeedMapDump=1");
+    }
+
+    private void applyGyroSuggestion() {
+        if (gyroSuggestion <= 0) {
+            return;
+        }
+        gyroScale.input.setText(String.format(Locale.US, "%.5f", gyroSuggestion));
+        saveParams();
+        if (link.isConnected()) {
+            link.send("GyroScale=" + gyroScale.value());
+        }
+        gyroRow.setVisibility(View.GONE);
+    }
+
+    private void confirmRename() {
+        String name = btNameInput.getText().toString().trim();
+        if (!validName(name)) {
+            showBtStatus("Use 1-20 characters: A-Z 0-9 space _ - .");
+            return;
+        }
+        if (!requireConnected()) {
+            return;
+        }
         new AlertDialog.Builder(this)
-                .setTitle("Bluetooth permission needed")
-                .setMessage("Android blocks Bluetooth access. Open app settings and allow Nearby devices/Bluetooth.")
-                .setPositiveButton("App settings", (dialog, which) -> {
-                    Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                    intent.setData(Uri.fromParts("package", getPackageName(), null));
-                    startActivity(intent);
+                .setTitle("Rename module")
+                .setMessage("The Bluetooth link can drop after the rename.")
+                .setPositiveButton("Rename", (d, w) -> {
+                    saveParams();
+                    link.send("BtNameNow=" + name);
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
     }
 
-    private void setDeviceAdapter(ArrayList<String> names) {
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names);
-        deviceSpinner.setAdapter(adapter);
+    private static boolean validName(String name) {
+        if (name == null || name.isEmpty() || name.length() > BT_NAME_MAX_LEN) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' '
+                    || c == '_' || c == '-' || c == '.')) {
+                return false;
+            }
+        }
+        return true;
     }
 
-    private void connectSelectedDevice() {
-        if (!hasBtPermission()) {
-            requestBluetoothPermissionIfNeeded();
-            showPermissionHelpIfNeeded();
-            return;
-        }
-        int index = deviceSpinner.getSelectedItemPosition();
-        if (index < 0 || index >= pairedDevices.size()) {
-            toast("Pair HC-04/HC-05 in Android Bluetooth settings first");
-            return;
-        }
+    // ------------------------------------------------------------------ legacy route
 
-        BluetoothDevice device = pairedDevices.get(index);
-        setStatus("Connecting...");
-
-        new Thread(() -> {
-            try {
-                closeConnection();
-                BluetoothSocket newSocket = device.createRfcommSocketToServiceRecord(SPP_UUID);
-                bluetoothAdapter.cancelDiscovery();
-                newSocket.connect();
-                socket = newSocket;
-                outputStream = newSocket.getOutputStream();
-                startReadThread(newSocket.getInputStream());
-                String name = device.getName() == null ? device.getAddress() : device.getName();
-                mainHandler.post(() -> setStatus("Connected: " + name));
-            } catch (IOException | SecurityException ex) {
-                mainHandler.post(() -> {
-                    setStatus("Disconnected");
-                    showError("Bluetooth connection failed", ex.getMessage());
-                });
-                closeConnection();
+    private boolean optimizeRoute(boolean report) {
+        if (recordedRoute.size() < 2) {
+            if (report) {
+                showWarning("Download GRUZIK.txt first");
             }
-        }).start();
+            return false;
+        }
+        RouteOptimizer.Params p = new RouteOptimizer.Params();
+        p.step = Math.round(optStep.floatValue(80));
+        p.smoothing = Math.round(optSmooth.floatValue(5));
+        p.baseSpeed = optBase.floatValue(40);
+        p.gain = optGain.floatValue(60);
+        p.minSpeed = optMin.floatValue(35);
+        p.maxSpeed = optMax.floatValue(95);
+        optimizedRoute.clear();
+        optimizedRoute.addAll(RouteOptimizer.optimize(recordedRoute, p));
+        updateRouteUi();
+        return !optimizedRoute.isEmpty();
     }
 
-    private void startReadThread(InputStream inputStream) {
-        readThreadRunning = false;
-        if (readThread != null) {
-            readThread.interrupt();
+    private void uploadRoute() {
+        if (!requireConnected() || optimizedRoute.isEmpty()) {
+            return;
         }
-
-        readThreadRunning = true;
-        readThread = new Thread(() -> {
-            byte[] buffer = new byte[256];
-            while (readThreadRunning) {
-                try {
-                    int len = inputStream.read(buffer);
-                    if (len > 0) {
-                        String text = new String(buffer, 0, len, StandardCharsets.UTF_8);
-                        mainHandler.post(() -> handleIncomingText(text));
-                    }
-                } catch (IOException ex) {
-                    if (readThreadRunning) {
-                        mainHandler.post(() -> setStatus("Disconnected"));
-                    }
-                    return;
-                }
-            }
-        });
-        readThread.start();
+        int count = optimizedRoute.size();
+        transferText.setText("Uploading map.txt, " + count + " points");
+        link.send("MapUploadBegin=" + count);
+        link.pause(160);
+        for (RoutePoint p : optimizedRoute) {
+            link.send(String.format(Locale.US, "MapPoint=%.3f,%.3f,%.3f", p.x, p.y, p.speed), 35, false);
+        }
+        link.send("MapUploadEnd=1");
     }
 
-    private void closeConnection() {
-        readThreadRunning = false;
-        try {
-            if (socket != null) {
-                socket.close();
-            }
-        } catch (IOException ignored) {
+    private void runRoute() {
+        if (!requireConnected()) {
+            return;
         }
-        socket = null;
-        outputStream = null;
-        mainHandler.post(() -> setStatus("Disconnected"));
+        if (optimizedRoute.isEmpty() && !optimizeRoute(true)) {
+            return;
+        }
+        uploadRoute();
+        link.pause(300);
+        startRun(START_ROUTE, true);
     }
 
-    private void handleIncomingText(String text) {
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (c == '\n') {
-                String line = rxLineBuffer.toString().trim();
-                rxLineBuffer.setLength(0);
-                if (!line.isEmpty()) {
-                    handleRobotLine(line);
-                }
-            } else if (c != '\r') {
-                rxLineBuffer.append(c);
-            }
+    private void updateRouteUi() {
+        if (trackView == null) {
+            return;
         }
+        trackView.setRoutes(recordedRoute, optimizedRoute, robotRoute);
+        routeInfoText.setText(String.format(Locale.US, "GRUZIK.txt %d pts, %.2f m   optimized %d pts   map.txt %d pts",
+                recordedRoute.size(), RouteOptimizer.length(recordedRoute), optimizedRoute.size(), robotRoute.size()));
     }
 
-    private void handleRobotLine(String line) {
-        if (line.startsWith("ODOM,")) {
-            parseOdomTelemetry(line);
-            return;
-        }
-
-        if (line.startsWith("DBG,")) {
-            parseDebugTelemetry(line);
-            return;
-        }
-
-        if (line.startsWith("TELEMETRY,")) {
-            appendLog("< " + line + "\n");
-            return;
-        }
-
-        if (line.startsWith("BT_NAME_")) {
-            handleBluetoothNameStatus(line);
-            appendLog("< " + line + "\n");
-            return;
-        }
-
-        if (line.startsWith("STARTING,") || "Start".equals(line)) {
-            lastStartAckMs = System.currentTimeMillis();
-            if (transferText != null && line.startsWith("STARTING,")) {
-                transferText.setText(line);
-            }
-            appendLog("< " + line + "\n");
-            return;
-        }
-
-        if (line.startsWith("MAP_ERROR") || line.startsWith("SD_ERROR")) {
-            if (transferText != null) {
-                if ((line.startsWith("MAP_ERROR,open_read,map.txt,4")) ||
-                        (line.startsWith("MAP_ERROR,open_playback,map.txt,4"))) {
-                    robotOptimizedRoute.clear();
-                    updateRouteUi();
-                    transferText.setText("map.txt missing on SD - use Upload or Run map");
-                } else {
-                    transferText.setText(line);
-                }
-            }
-            appendLog("< " + line + "\n");
-            return;
-        }
-
-        if (line.startsWith("MAP_AUTO_CLOSED")) {
-            if (transferText != null) {
-                transferText.setText("Mapping auto-closed near start - Get saved");
-            }
-            appendLog("< " + line + "\n");
-            return;
-        }
-
-        if (line.startsWith("MAP_BEGIN,")) {
-            incomingMapKind = line.substring("MAP_BEGIN,".length()).trim();
-            incomingRoute.clear();
-            transferText.setText("Receiving " + incomingMapKind + "...");
-            appendLog("< " + line + "\n");
-            return;
-        }
-
-        if (line.startsWith("MAP,") && incomingMapKind != null) {
-            RoutePoint point = parseRoutePoint(line.substring(4), incomingMapKind);
-            if (point != null) {
-                incomingRoute.add(point);
-                if (incomingRoute.size() % 50 == 0) {
-                    transferText.setText("Receiving " + incomingMapKind + ": " + incomingRoute.size() + " pts");
-                }
-            }
-            return;
-        }
-
-        if (line.startsWith("MAP_END") && incomingMapKind != null) {
-            boolean autoOptimized = false;
-            if ("recorded".equals(incomingMapKind)) {
-                recordedRoute.clear();
-                recordedRoute.addAll(incomingRoute);
-                optimizedRoute.clear();
-                autoOptimized = optimizeRecordedRoute(false);
-            } else {
-                robotOptimizedRoute.clear();
-                robotOptimizedRoute.addAll(incomingRoute);
-            }
-            String message = "Received " + incomingMapKind + ": " + incomingRoute.size() + " pts";
-            if (autoOptimized) {
-                message += " / optimized: " + optimizedRoute.size() + " pts";
-            }
-            transferText.setText(message);
-            appendLog("< " + line + "\n");
-            incomingRoute.clear();
-            incomingMapKind = null;
-            updateRouteUi();
-            return;
-        }
-
-        appendLog("< " + line + "\n");
-        updateVoltageFromRobotText(line);
-        if (line.startsWith("UPLOAD_")) {
-            transferText.setText(line);
-        }
-    }
-
-    private void parseOdomTelemetry(String line) {
-        String[] tokens = line.split(",");
-        if (tokens.length < 10 || odomXText == null) {
-            return;
-        }
-
-        float x = parseFloatToken(tokens, 1, 0.0f);
-        float y = parseFloatToken(tokens, 2, 0.0f);
-        float yaw = parseFloatToken(tokens, 3, 0.0f);
-        float distance = parseFloatToken(tokens, 4, 0.0f);
-        float leftSpeed = parseFloatToken(tokens, 5, 0.0f);
-        float rightSpeed = parseFloatToken(tokens, 6, 0.0f);
-        float gyroZ = parseFloatToken(tokens, 7, 0.0f);
-        float encoderYaw = parseFloatToken(tokens, 8, 0.0f);
-        float gyroYaw = parseFloatToken(tokens, 9, 0.0f);
-
-        odomXText.setText(String.format(Locale.US, "%.3f m", x));
-        odomYText.setText(String.format(Locale.US, "%.3f m", y));
-        odomYawText.setText(String.format(Locale.US, "%.1f deg", yaw));
-        odomDistanceText.setText(String.format(Locale.US, "%.3f m", distance));
-        odomSpeedText.setText(String.format(Locale.US, "L %.3f / R %.3f m/s", leftSpeed, rightSpeed));
-        odomGyroText.setText(String.format(Locale.US, "%.2f dps", gyroZ));
-        odomFusionText.setText(String.format(Locale.US, "enc %.1f deg / gyro %.1f deg", encoderYaw, gyroYaw));
-    }
-
-    private void parseDebugTelemetry(String line) {
-        String[] tokens = line.split(",");
-        if (tokens.length < 25 || debugLineSummaryText == null) {
-            return;
-        }
-
-        float sensorPosition = parseFloatToken(tokens, 1, 0.0f);
-        int activeCount = Math.round(parseFloatToken(tokens, 2, 0.0f));
-        int lastEnd = Math.round(parseFloatToken(tokens, 3, 0.0f));
-        int leftDelta = Math.round(parseFloatToken(tokens, 4, 0.0f));
-        int rightDelta = Math.round(parseFloatToken(tokens, 5, 0.0f));
-        float leftRpm = parseFloatToken(tokens, 6, 0.0f);
-        float rightRpm = parseFloatToken(tokens, 7, 0.0f);
-        float leftDistance = parseFloatToken(tokens, 8, 0.0f);
-        float rightDistance = parseFloatToken(tokens, 9, 0.0f);
-        float gyroRaw = parseFloatToken(tokens, 10, 0.0f);
-        float gyroBias = parseFloatToken(tokens, 11, 0.0f);
-        float gyroZ = parseFloatToken(tokens, 12, 0.0f);
-
-        debugLineSummaryText.setText(String.format(Locale.US,
-                "pos %.0f   active %d   last %s",
-                sensorPosition, activeCount, lastEnd == 1 ? "right" : "left"));
-
-        StringBuilder sensorBuilder = new StringBuilder();
-        for (int i = 13; i < Math.min(tokens.length, 25); i++) {
-            if (sensorBuilder.length() > 0) {
-                sensorBuilder.append("  ");
-            }
-            sensorBuilder.append(String.format(Locale.US, "S%02d=%s", i - 12, tokens[i].trim()));
-            if ((i - 12) == 6) {
-                sensorBuilder.append("\n");
-            }
-        }
-        debugLineRawText.setText(sensorBuilder.toString());
-
-        debugEncoderText.setText(String.format(Locale.US,
-                "delta L %d / R %d cnt\nrpm L %.1f / R %.1f\ndist L %.4f / R %.4f m",
-                leftDelta, rightDelta, leftRpm, rightRpm, leftDistance, rightDistance));
-        debugImuText.setText(String.format(Locale.US,
-                "gyro raw %.2f dps\nbias %.2f dps\ngyro z %.2f dps",
-                gyroRaw, gyroBias, gyroZ));
-    }
-
-    private RoutePoint parseRoutePoint(String value, String kind) {
+    private static RoutePoint parseRoutePoint(String value, boolean recorded) {
         String[] tokens = value.trim().split("[,\\s]+");
         ArrayList<Float> numbers = new ArrayList<>();
         for (String token : tokens) {
-            if (token == null || token.isEmpty()) {
-                continue;
-            }
             try {
-                numbers.add(Float.parseFloat(token.replace(',', '.')));
+                numbers.add(Float.parseFloat(token));
             } catch (NumberFormatException ignored) {
             }
         }
-
         if (numbers.size() < 2) {
             return null;
         }
-
-        float speed = 0.0f;
-        if ("recorded".equals(kind) && numbers.size() >= 5) {
+        float speed = 0;
+        if (recorded && numbers.size() >= 5) {
             speed = numbers.get(4);
         } else if (numbers.size() >= 3) {
             speed = numbers.get(2);
@@ -1051,479 +1159,568 @@ public class MainActivity extends Activity {
         return new RoutePoint(numbers.get(0), numbers.get(1), speed);
     }
 
-    private void startNormalDrive() {
-        new Thread(() -> {
-            long startRequestMs = System.currentTimeMillis();
-            sendLine("Telemetry=off\n", true);
-            sleepMs(40);
-            sendPresetValuesBlocking();
-            sleepMs(120);
-            sendLine("StartNormal=1\n", true);
-            fallbackStartIfNeeded(startRequestMs, "P");
-        }).start();
+    // ------------------------------------------------------------------ speed profile
+
+    private SpeedMapModel.Params speedParams() {
+        SpeedMapModel.Params p = new SpeedMapModel.Params();
+        for (Param q : params) {
+            if (q.group != G_SPEED) {
+                continue;
+            }
+            switch (q.key) {
+                case "SmVmax": p.vMax = q.floatValue(p.vMax); break;
+                case "SmVmin": p.vMin = q.floatValue(p.vMin); break;
+                case "SmAcc": p.accel = q.floatValue(p.accel); break;
+                case "SmBrake": p.brake = q.floatValue(p.brake); break;
+                case "SmLat": p.lat = q.floatValue(p.lat); break;
+                case "SmLag": p.lagS = q.floatValue(60) / 1000f; break;
+                case "SmWin": p.windowM = q.floatValue(10) / 100f; break;
+                case "SmKp": p.kp = q.floatValue(p.kp); break;
+                case "SmFF": p.ff = q.floatValue(p.ff); break;
+                case "SmLaps": p.laps = Math.round(q.floatValue(0)); break;
+                default: break;
+            }
+        }
+        return p;
     }
 
-    private void startMappingRun() {
-        saveMappingSettings();
-        new Thread(() -> {
-            mainHandler.post(() -> transferText.setText("Starting mapping..."));
-            long startRequestMs = System.currentTimeMillis();
-            sendLine("Telemetry=off\n", true);
-            sleepMs(40);
-            sendPresetValuesBlocking();
-            sleepMs(120);
-            sendLine("StartMapping=1\n", true);
-            fallbackStartIfNeeded(startRequestMs, "M");
-        }).start();
+    private void rebuildSpeedProfile() {
+        if (!speedMap.isEmpty()) {
+            speedMap.build(speedParams());
+            trackView.setSpeedMap(speedMap);
+            profileView.setModel(speedMap);
+        }
+        updateMapStatus();
     }
 
-    private void startPlaybackRun() {
-        if (optimizedRoute.isEmpty() && !optimizeRecordedRoute(true)) {
+    private void updateMapStatus() {
+        if (mapStatusText == null) {
             return;
         }
-        saveMappingSettings();
-
-        new Thread(() -> {
-            mainHandler.post(() -> transferText.setText("Starting playback..."));
-            sendLine("Telemetry=off\n", true);
-            sleepMs(40);
-            sendMappingControllerValuesBlocking();
-            sleepMs(120);
-            if (!uploadOptimizedRouteBlocking()) {
-                return;
-            }
-            sleepMs(300);
-            long startRequestMs = System.currentTimeMillis();
-            sendLine("StartPlayback=1\n", true);
-            fallbackStartIfNeeded(startRequestMs, "U");
-        }).start();
-    }
-
-    private void fallbackStartIfNeeded(long startRequestMs, String mode) {
-        sleepMs(650);
-        if (lastStartAckMs >= startRequestMs) {
+        if (!profile.speedMap) {
+            mapStatusText.setText(profile.routeMap ? "Odometry route only, flash the new firmware for the speed map" : "");
             return;
         }
-
-        sendLine("Mode=" + mode + "\n", true);
-        sleepMs(120);
-        sendLine("Mode=Y\n", true);
-    }
-
-    private void stopRobot() {
-        new Thread(() -> {
-            sendManualStopBlocking();
-            sleepMs(25);
-            sendTireCleanStopBlocking();
-            sleepMs(25);
-            sendLine("Telemetry=off\n", true);
-            sleepMs(40);
-            sendLine("Mode=N\n", true);
-        }).start();
-    }
-
-    private void sendTireCleanStart() {
-        saveMappingSettings();
-        new Thread(() -> {
-            String speed = cleanSpeedInput.getText().toString().trim();
-            if (speed.isEmpty()) {
-                speed = "170";
-            }
-            sendLine("CleanSpeed=" + speed + "\n", true);
-            sleepMs(25);
-            sendLine("Clean=1\n", true);
-        }).start();
-    }
-
-    private void sendTireCleanStop() {
-        new Thread(this::sendTireCleanStopBlocking).start();
-    }
-
-    private void sendTireCleanStopBlocking() {
-        sendLine("Clean=0\n", true);
-    }
-
-    private void sendManualDrive(float forward, float turn, boolean force) {
-        int maxSpeed = clampInt(readInt(joystickSpeedInput, 85), 0, 250);
-        int left = clampInt(Math.round((forward + turn) * maxSpeed), -250, 250);
-        int right = clampInt(Math.round((forward - turn) * maxSpeed), -250, 250);
-
-        if (!force) {
-            long now = System.currentTimeMillis();
-            if ((now - lastManualSendMs) < 70 &&
-                    Math.abs(left - lastManualLeft) < 4 &&
-                    Math.abs(right - lastManualRight) < 4) {
-                return;
-            }
-            lastManualSendMs = now;
-        }
-
-        lastManualLeft = left;
-        lastManualRight = right;
-        joystickStatusText.setText(String.format(Locale.US, "L %d   R %d", left, right));
-        String command = String.format(Locale.US, "Manual=%d,%d\n", left, right);
-        new Thread(() -> sendLine(command, false)).start();
-    }
-
-    private void sendManualStop() {
-        new Thread(this::sendManualStopBlocking).start();
-    }
-
-    private void sendManualStopBlocking() {
-        lastManualLeft = 0;
-        lastManualRight = 0;
-        lastManualSendMs = 0L;
-        if (joystickStatusText != null) {
-            mainHandler.post(() -> joystickStatusText.setText("L 0   R 0"));
-        }
-        sendLine("Manual=0,0\n", true);
-    }
-
-    private void sendPresetValuesAsync() {
-        new Thread(this::sendPresetValuesBlocking).start();
-    }
-
-    private void sendPresetValuesBlocking() {
-        for (Map.Entry<String, EditText> entry : fields.entrySet()) {
-            String value = entry.getValue().getText().toString().trim();
-            sendLine(entry.getKey() + "=" + value + "\n", true);
-            sleepMs(30);
-        }
-    }
-
-    private void sendMappingControllerValuesBlocking() {
-        saveMappingSettings();
-        sendLine("MapP=" + mapPInput.getText().toString().trim() + "\n", true);
-        sleepMs(18);
-        sendLine("MapI=" + mapIInput.getText().toString().trim() + "\n", true);
-        sleepMs(18);
-        sendLine("MapD=" + mapDInput.getText().toString().trim() + "\n", true);
-        sleepMs(18);
-        sendLine("MapSpeed=" + mapSpeedInput.getText().toString().trim() + "\n", true);
-    }
-
-    private void confirmBluetoothNameNow() {
-        new AlertDialog.Builder(this)
-                .setTitle("Try AT now")
-                .setMessage("Use this only when the module is in AT mode. The BT link can drop after rename.")
-                .setPositiveButton("Try", (dialog, which) -> sendBluetoothName(true))
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void sendBluetoothName(boolean tryNow) {
-        String name = btNameInput.getText().toString().trim();
-        if (!isValidBluetoothName(name)) {
-            toast("Use 1-20 chars: A-Z 0-9 space _ - .");
+        if (speedMap.isEmpty()) {
+            mapStatusText.setText("No speed map. Start mapping, or get the one saved on the robot.");
             return;
         }
-
-        prefs().edit().putString(KEY_BT_NAME, name).apply();
-        String command = tryNow ? "BtNameNow=" : "BtName=";
-        if (btNameStatusText != null) {
-            btNameStatusText.setText(tryNow ? "Trying AT rename..." : "Saved. Reboot robot in KEY/AT mode.");
+        String text = String.format(Locale.US, "%.2f m, %s, lap about %.2f s, %.1f - %.1f m/s",
+                speedMap.length, speedMap.closed ? "closed" : "open", speedMap.lapTime, speedMap.vLow, speedMap.vPeak);
+        if (speedMap.closed && speedMap.closeErrorM > 0) {
+            text += String.format(Locale.US, ", lap gap %.0f mm", speedMap.closeErrorM * 1000);
         }
-        new Thread(() -> sendLine(command + name + "\n", true)).start();
+        if (!robotReadyText.isEmpty()) {
+            text += "\n" + robotReadyText;
+        }
+        mapStatusText.setText(text);
     }
 
-    private boolean isValidBluetoothName(String name) {
-        if (name == null || name.length() == 0 || name.length() > BT_NAME_MAX_LEN) {
-            return false;
-        }
-        for (int i = 0; i < name.length(); i++) {
-            char c = name.charAt(i);
-            boolean allowed = (c >= 'A' && c <= 'Z') ||
-                    (c >= 'a' && c <= 'z') ||
-                    (c >= '0' && c <= '9') ||
-                    c == ' ' || c == '_' || c == '-' || c == '.';
-            if (!allowed) {
-                return false;
+    // ================================================================== robot replies
+
+    @Override
+    public void onLine(String line) {
+        if (line.startsWith("S,") || line.startsWith("DBG,")) {
+            // only the newest sensor frame matters
+            pendingSensorFrame = line;
+            if (!sensorFramePosted) {
+                sensorFramePosted = true;
+                main.post(() -> {
+                    sensorFramePosted = false;
+                    String frame = pendingSensorFrame;
+                    if (frame != null) {
+                        handleSensorFrame(frame);
+                    }
+                });
             }
-        }
-        return true;
-    }
-
-    private void handleBluetoothNameStatus(String line) {
-        if (btNameStatusText == null) {
             return;
         }
-
-        if (line.startsWith("BT_NAME_PENDING,")) {
-            btNameStatusText.setText("Pending. Reboot robot in KEY/AT mode.");
-        } else if (line.startsWith("BT_NAME_OK,")) {
-            btNameStatusText.setText("Renamed. Remove pairing and pair again.");
-        } else if (line.startsWith("BT_NAME_ERROR,at_no_response")) {
-            btNameStatusText.setText("No AT response. Enter KEY/AT mode and reboot.");
-        } else {
-            btNameStatusText.setText(line);
-        }
+        main.post(() -> handleLine(line));
     }
 
-    private void sendCommand(String key, String value) {
-        if (value == null || value.trim().isEmpty()) {
-            toast("Missing value for " + key);
-            return;
-        }
-        sendLine(key + "=" + value.trim() + "\n", true);
+    @Override
+    public void onSent(String command) {
+        appendLog("> " + command);
     }
 
-    private void sendLine(String command, boolean showLog) {
-        OutputStream stream = outputStream;
-        if (stream == null) {
-            appendLog("> not connected: " + command);
-            return;
-        }
-
-        try {
-            synchronized (writeLock) {
-                stream.write(command.getBytes(StandardCharsets.US_ASCII));
-                stream.flush();
-            }
-            if (showLog) {
-                appendLog("> " + command);
-            }
-        } catch (IOException ex) {
-            mainHandler.post(() -> showError("UART send failed", ex.getMessage()));
-            closeConnection();
-        }
-    }
-
-    private boolean optimizeRecordedRoute() {
-        return optimizeRecordedRoute(true);
-    }
-
-    private boolean optimizeRecordedRoute(boolean showStatus) {
-        if (recordedRoute.size() < 2) {
-            if (showStatus) {
-                toast("Najpierw pobierz zapisana trase");
-            }
-            return false;
-        }
-        saveMappingSettings();
-
-        int step = clampInt(readInt(optStepInput, 80), 1, 500);
-        int smoothing = clampInt(readInt(optSmoothInput, 5), 1, 101);
-        float baseSpeed = readFloat(optBaseSpeedInput, 40.0f);
-        float gain = readFloat(optGainInput, 120.0f);
-        float minSpeed = readFloat(optMinSpeedInput, 35.0f);
-        float maxSpeed = readFloat(optMaxSpeedInput, 120.0f);
-        if (maxSpeed < minSpeed) {
-            float tmp = maxSpeed;
-            maxSpeed = minSpeed;
-            minSpeed = tmp;
-        }
-
-        boolean closedInput = isRecordedLoopClosed(recordedRoute);
-        ArrayList<RoutePoint> source = loopSourceForOptimization(recordedRoute);
-        if (source.size() < 2) {
-            if (showStatus) {
-                toast("Zapisana trasa jest za krotka");
-            }
-            return false;
-        }
-
-        ArrayList<RoutePoint> sampled = new ArrayList<>();
-        for (int i = 0; i < source.size(); i += step) {
-            sampled.add(source.get(i));
-        }
-        RoutePoint last = source.get(source.size() - 1);
-        if (sampled.isEmpty() || distance(sampled.get(sampled.size() - 1), last) > 0.001f) {
-            sampled.add(last);
-        }
-
-        ArrayList<RoutePoint> smoothed = closedInput ? smoothClosedRoute(sampled, smoothing) : smoothRoute(sampled, smoothing);
-        optimizedRoute.clear();
-        for (int i = 0; i < smoothed.size(); i++) {
-            RoutePoint point = smoothed.get(i);
-            RoutePoint previous = closedInput ? smoothed.get((i + smoothed.size() - 1) % smoothed.size()) : smoothed.get(Math.max(0, i - 1));
-            RoutePoint next = closedInput ? smoothed.get((i + 1) % smoothed.size()) : smoothed.get(Math.min(smoothed.size() - 1, i + 1));
-            float turn = turnAmount(previous, point, next);
-            float speed = clampFloat(maxSpeed - (gain * turn), minSpeed, maxSpeed);
-            if (turn < 0.20f) {
-                speed = Math.max(speed, Math.min(baseSpeed, maxSpeed));
-            }
-            speed = clampFloat(speed, minSpeed, maxSpeed);
-            optimizedRoute.add(new RoutePoint(point.x, point.y, speed));
-        }
-        updateRouteUi();
-        if (showStatus) {
-            transferText.setText("Optimized locally: " + optimizedRoute.size() + " pts / PID finish");
-        }
-        return true;
-    }
-
-    private ArrayList<RoutePoint> loopSourceForOptimization(List<RoutePoint> route) {
-        ArrayList<RoutePoint> source = new ArrayList<>();
-        if (route.isEmpty()) {
-            return source;
-        }
-
-        source.addAll(route);
-        if (source.size() > 2 && distance(source.get(0), source.get(source.size() - 1)) < 0.08f) {
-            source.remove(source.size() - 1);
-        }
-        return source;
-    }
-
-    private boolean isRecordedLoopClosed(List<RoutePoint> route) {
-        return route.size() > 2 && distance(route.get(0), route.get(route.size() - 1)) < 0.08f;
-    }
-
-    private float turnAmount(RoutePoint previous, RoutePoint point, RoutePoint next) {
-        float a = (float) Math.atan2(point.y - previous.y, point.x - previous.x);
-        float b = (float) Math.atan2(next.y - point.y, next.x - point.x);
-        return Math.abs(normalizeAngle(b - a)) / (float) Math.PI;
-    }
-
-    private float normalizeAngle(float angle) {
-        while (angle > Math.PI) {
-            angle -= (float) (2.0 * Math.PI);
-        }
-        while (angle < -Math.PI) {
-            angle += (float) (2.0 * Math.PI);
-        }
-        return angle;
-    }
-
-    private ArrayList<RoutePoint> smoothClosedRoute(List<RoutePoint> input, int window) {
-        ArrayList<RoutePoint> output = new ArrayList<>();
-        int countWindow = Math.min(Math.max(1, window), input.size());
-        int radius = countWindow / 2;
-        for (int i = 0; i < input.size(); i++) {
-            float x = 0.0f;
-            float y = 0.0f;
-            for (int j = 0; j < countWindow; j++) {
-                int index = (i - radius + j + input.size()) % input.size();
-                x += input.get(index).x;
-                y += input.get(index).y;
-            }
-            output.add(new RoutePoint(x / countWindow, y / countWindow, 0.0f));
-        }
-        return output;
-    }
-
-    private ArrayList<RoutePoint> smoothRoute(List<RoutePoint> input, int window) {
-        ArrayList<RoutePoint> output = new ArrayList<>();
-        int radius = Math.max(0, window / 2);
-        for (int i = 0; i < input.size(); i++) {
-            int from = Math.max(0, i - radius);
-            int to = Math.min(input.size() - 1, i + radius);
-            float x = 0.0f;
-            float y = 0.0f;
-            int count = 0;
-            for (int j = from; j <= to; j++) {
-                x += input.get(j).x;
-                y += input.get(j).y;
-                count++;
-            }
-            output.add(new RoutePoint(x / count, y / count, 0.0f));
-        }
-        return output;
-    }
-
-    private void uploadOptimizedRoute() {
-        if (optimizedRoute.isEmpty() && !optimizeRecordedRoute(true)) {
-            return;
-        }
-
-        new Thread(this::uploadOptimizedRouteBlocking).start();
-    }
-
-    private boolean uploadOptimizedRouteBlocking() {
-        if (uploadRunning) {
-            mainHandler.post(() -> toast("Upload already running"));
-            return false;
-        }
-        if (outputStream == null) {
-            mainHandler.post(() -> toast("Not connected"));
-            return false;
-        }
-
-        ArrayList<RoutePoint> routeToUpload = new ArrayList<>(optimizedRoute);
-        if (routeToUpload.isEmpty()) {
-            mainHandler.post(() -> toast("No optimized route"));
-            return false;
-        }
-
-        uploadRunning = true;
-        try {
-            int count = routeToUpload.size();
-            mainHandler.post(() -> transferText.setText("Uploading map.txt: 0/" + count));
-            sendLine("MapUploadBegin=" + count + "\n", true);
-            sleepMs(160);
-            for (int i = 0; i < count; i++) {
-                RoutePoint p = routeToUpload.get(i);
-                String line = String.format(Locale.US, "MapPoint=%.3f,%.3f,%.3f\n", p.x, p.y, p.speed);
-                sendLine(line, false);
-                int progress = i + 1;
-                if (progress % 25 == 0 || progress == count) {
-                    mainHandler.post(() -> transferText.setText("Uploading map.txt: " + progress + "/" + count));
+    @Override
+    public void onLinkState(int state, String message) {
+        main.post(() -> {
+            if (state == BtLink.CONNECTED) {
+                connectButton.setText("Disconnect");
+                deviceSpinner.setEnabled(false);
+                hideWarning();
+                infoReceived = false;
+                requestedTelemetry = "unknown";
+                RobotProfile forced = RobotProfile.forOverride(prefs().getInt("robot.override", RobotProfile.AUTO));
+                if (forced != null) {
+                    switchProfile(forced);
                 }
-                sleepMs(35);
+                link.send("Telemetry=off");
+                requestedTelemetry = "off";
+                link.send("Info=1");
+                main.postDelayed(() -> {
+                    if (!infoReceived && link.isConnected()
+                            && RobotProfile.forOverride(prefs().getInt("robot.override", 0)) == null) {
+                        switchProfile(RobotProfile.fromName(link.deviceName()));
+                        updateTelemetry();
+                    }
+                }, 1200);
+                applyProfile();
+                updateTelemetry();
+            } else if (state == BtLink.CONNECTING) {
+                connectButton.setText("Connecting");
+                deviceSpinner.setEnabled(false);
+            } else {
+                connectButton.setText("Connect");
+                deviceSpinner.setEnabled(true);
+                robotRunning = false;
+                requestedTelemetry = "off";
+                applyProfile();
+                if (message != null) {
+                    showWarning(message);
+                }
             }
-            sendLine("MapUploadEnd=1\n", true);
-            mainHandler.post(() -> transferText.setText("Uploaded map.txt: " + count + " pts"));
-            return true;
-        } finally {
-            uploadRunning = false;
+        });
+    }
+
+    private void handleLine(String line) {
+        if (line.startsWith("L,")) {
+            handleLiveFrame(line);
+            return;
+        }
+        if (line.startsWith("ODOM,")) {
+            handleOdom(line);
+            return;
+        }
+        if (line.startsWith("SMH,")) {
+            speedMap.addLine(line.split(","));
+            int expected = speedMap.expectedSamples();
+            if (expected > 0) {
+                transferText.setText(String.format(Locale.US, "Downloading speed map, %d%%",
+                        Math.min(100, speedMap.receivedSamples() * 100 / expected)));
+            }
+            return;
+        }
+        if (line.startsWith("MAP,") && incomingRouteKind != null) {
+            RoutePoint p = parseRoutePoint(line.substring(4), "recorded".equals(incomingRouteKind));
+            if (p != null) {
+                incomingRoute.add(p);
+                if (incomingRoute.size() % 50 == 0) {
+                    transferText.setText("Receiving " + incomingRouteKind + ", " + incomingRoute.size() + " points");
+                }
+            }
+            return;
+        }
+
+        appendLog("< " + line);
+
+        if (line.startsWith("INFO,")) {
+            handleInfo(line);
+        } else if (line.startsWith("STARTING,") || "Start".equals(line)) {
+            lastStartAckMs = SystemClock.uptimeMillis();
+            robotRunning = true;
+            hideWarning();
+            if (line.startsWith("STARTING,")) {
+                transferText.setText(line.substring(9));
+            }
+            updateTelemetry();
+        } else if ("Stop".equals(line)) {
+            robotRunning = false;
+            trackView.hideMarker();
+            updateTelemetry();
+        } else if (line.startsWith("SM_BEGIN,")) {
+            speedMap.begin(line.split(","));
+        } else if (line.startsWith("SM_END")) {
+            if (speedMap.finish()) {
+                rebuildSpeedProfile();
+                transferText.setText(String.format(Locale.US, "Speed map, %d points", speedMap.n));
+            } else {
+                transferText.setText("Speed map transfer incomplete, try again");
+            }
+            updateTelemetry();
+        } else if (line.startsWith("SPEEDMAP_READY,")) {
+            handleSpeedMapReady(line);
+        } else if (line.startsWith("SPEEDMAP_SAVED") || line.startsWith("SPEEDMAP_ERROR,save")) {
+            if (autoDownloadSpeedMap) {
+                autoDownloadSpeedMap = false;
+                requestSpeedMap();
+            }
+        } else if (line.startsWith("SPEEDRUN_DONE")) {
+            transferText.setText("Speed run finished");
+        } else if (line.startsWith("MAP_AUTO_CLOSED")) {
+            robotRunning = false;
+            handleAutoClosed(line);
+            updateTelemetry();
+        } else if (line.startsWith("GYRO_SCALE,")) {
+            handleGyroScale(line);
+        } else if (line.startsWith("MAP_BEGIN,")) {
+            incomingRouteKind = line.substring(10).trim();
+            incomingRoute.clear();
+        } else if (line.startsWith("MAP_END") && incomingRouteKind != null) {
+            if ("recorded".equals(incomingRouteKind)) {
+                recordedRoute.clear();
+                recordedRoute.addAll(incomingRoute);
+                optimizeRoute(false);
+            } else {
+                robotRoute.clear();
+                robotRoute.addAll(incomingRoute);
+            }
+            transferText.setText("Received " + incomingRouteKind + ", " + incomingRoute.size() + " points");
+            incomingRoute.clear();
+            incomingRouteKind = null;
+            updateRouteUi();
+        } else if (line.startsWith("UPLOAD_")) {
+            transferText.setText(line);
+        } else if (line.startsWith("TELEMETRY,")) {
+            String mode = line.substring(10);
+            if (mode.startsWith("off,")) {
+                showWarning("Sensor stream works only while the robot is stopped");
+            }
+        } else if (line.startsWith("BT_NAME_OK,")) {
+            showBtStatus("Renamed. Remove the pairing in Android and pair again.");
+        } else if (line.startsWith("BT_NAME_ERROR,at_no_response")) {
+            showBtStatus("No AT response. Put the module in AT mode and try again.");
+        } else if (line.startsWith("BT_NAME_")) {
+            showBtStatus(line);
+        }
+
+        if (line.startsWith("!") || line.contains("ERROR") || line.contains("stop_robot_first")
+                || line.startsWith("Stop robot") || line.startsWith("map.txt is empty")) {
+            if (!line.startsWith("TELEMETRY,")) {
+                showWarning(line.replace("!", "").trim());
+            }
+            if (line.startsWith("MAP_ERROR,open_read,map.txt,4") || line.startsWith("MAP_ERROR,open_playback,map.txt,4")) {
+                robotRoute.clear();
+                updateRouteUi();
+            }
+        }
+
+        int battery = line.indexOf("Battery");
+        if (battery >= 0) {
+            String volts = firstNumber(line.substring(battery));
+            if (volts != null) {
+                voltageText.setText(volts + " V");
+            }
         }
     }
 
-    private void updateRouteUi() {
-        if (routeMapView != null) {
-            routeMapView.setRoutes(recordedRoute, optimizedRoute, robotOptimizedRoute);
+    private void handleInfo(String line) {
+        // INFO,<name>,<fw>,<sensors>,<caps>,<battery_mV>,<speed map samples>
+        infoReceived = true;
+        String[] t = line.split(",");
+        String name = t.length > 1 ? t[1].trim() : "";
+        int fw = parseInt(t, 2, 1);
+        int sensors = parseInt(t, 3, 12);
+        String caps = t.length > 4 ? t[4] : "";
+        int mv = parseInt(t, 5, 0);
+        if (mv > 0) {
+            voltageText.setText(String.format(Locale.US, "%.2f V", mv / 1000f));
         }
-        if (routeInfoText != null) {
-            routeInfoText.setText(String.format(Locale.US,
-                    "Saved: %d pts / %.2f m   Optimized: %d pts / %.2f m   map.txt: %d pts",
-                    recordedRoute.size(), routeLength(recordedRoute),
-                    optimizedRoute.size(), routeLength(optimizedRoute),
-                    robotOptimizedRoute.size()));
+        if (RobotProfile.forOverride(prefs().getInt("robot.override", 0)) != null) {
+            return;
+        }
+        String upper = name.toUpperCase(Locale.US);
+        RobotProfile next;
+        if (upper.contains("GRUZIK")) {
+            next = RobotProfile.gruzik(fw, caps);
+        } else if (upper.contains("REGIN")) {
+            next = RobotProfile.regin();
+        } else {
+            next = RobotProfile.generic(name, sensors);
+        }
+        switchProfile(next);
+        updateTelemetry();
+        if (next.speedMap && speedMap.isEmpty() && parseInt(t, 6, 0) > 0) {
+            mapStatusText.setText("Speed map saved on the robot, use Get speed map.");
         }
     }
 
-    private float routeLength(List<RoutePoint> route) {
-        float length = 0.0f;
-        for (int i = 1; i < route.size(); i++) {
-            length += distance(route.get(i - 1), route.get(i));
-        }
-        return length;
+    private void handleSpeedMapReady(String line) {
+        // SPEEDMAP_READY,count,len_mm,lap_ms,peak_mms,ff_x10,landmarks,closed
+        String[] t = line.split(",");
+        robotReadyText = String.format(Locale.US, "Robot: %.2f m, lap about %.2f s, peak %.2f m/s, FF %.1f, %d corners",
+                parseInt(t, 2, 0) / 1000f, parseInt(t, 3, 0) / 1000f, parseInt(t, 4, 0) / 1000f,
+                parseInt(t, 5, 0) / 10f, parseInt(t, 6, 0));
+        updateMapStatus();
     }
 
-    private float distance(RoutePoint a, RoutePoint b) {
-        float dx = b.x - a.x;
-        float dy = b.y - a.y;
-        return (float) Math.sqrt(dx * dx + dy * dy);
+    private void handleAutoClosed(String line) {
+        // MAP_AUTO_CLOSED,err_mm,len_mm,turn_cdeg,dropped
+        String[] t = line.split(",");
+        if (t.length >= 4) {
+            transferText.setText(String.format(Locale.US, "Lap closed, %.2f m, %d mm from the start, turn %.1f deg",
+                    parseInt(t, 2, 0) / 1000f, parseInt(t, 1, 0), parseInt(t, 3, 0) / 100f));
+        } else {
+            transferText.setText("Lap closed");
+        }
+        trackView.hideMarker();
     }
 
-    private void setDefaultValues() {
-        for (Map.Entry<String, EditText> entry : fields.entrySet()) {
-            String key = entry.getKey();
-            String value;
-            if ("Kp".equals(key)) value = "0.015";
-            else if ("Kd".equals(key)) value = "0.55";
-            else if ("Base_speed".equals(key)) value = "125";
-            else if ("Max_speed".equals(key)) value = "200";
-            else if ("Sharp_bend_speed_right".equals(key)) value = "-75";
-            else if ("Sharp_bend_speed_left".equals(key)) value = "120";
-            else if ("Bend_speed_right".equals(key)) value = "-75";
-            else if ("Bend_speed_left".equals(key)) value = "120";
-            else if ("Treshold".equals(key)) value = "3300";
-            else value = "0";
-            entry.getValue().setText(value);
+    private void handleGyroScale(String line) {
+        // GYRO_SCALE,suggested,turns,error_cdeg
+        String[] t = line.split(",");
+        try {
+            gyroSuggestion = Float.parseFloat(t[1]);
+        } catch (RuntimeException ex) {
+            return;
         }
-        presetNameInput.setText("Default");
+        float error = parseInt(t, 3, 0) / 100f;
+        gyroText.setText(String.format(Locale.US, "Gyro scale %.5f, the lap closed %+.1f deg off", gyroSuggestion,
+                error));
+        gyroRow.setVisibility(Math.abs(gyroSuggestion - gyroScale.floatValue(1)) > 0.0002f ? View.VISIBLE : View.GONE);
+    }
+
+    private void handleLiveFrame(String line) {
+        // L,s_mm,x_mm,y_mm,yaw_cdeg,v_mms,vt_mms,state,lap,sync_mm
+        String[] t = line.split(",");
+        if (t.length < 10) {
+            return;
+        }
+        float s = parseInt(t, 1, 0) / 1000f;
+        float x = parseInt(t, 2, 0) / 1000f;
+        float y = parseInt(t, 3, 0) / 1000f;
+        float yaw = (float) Math.toRadians(parseInt(t, 4, 0) / 100.0);
+        float v = parseInt(t, 5, 0) / 1000f;
+        float vt = parseInt(t, 6, 0) / 1000f;
+        robotState = parseInt(t, 7, 0);
+        int lap = parseInt(t, 8, 0);
+        int sync = parseInt(t, 9, 0);
+        robotRunning = robotState != 0;
+
+        liveSpeedText.setText(String.format(Locale.US, "%.2f", v));
+        if (robotState == 4) {
+            liveTargetText.setText(String.format(Locale.US, "%.2f", vt));
+            liveLapText.setText(String.valueOf(lap + 1));
+            liveSyncText.setText(String.valueOf(sync));
+            if (!speedMap.isEmpty() && speedMap.x.length == speedMap.n) {
+                int i = speedMap.indexAt(s);
+                int j = Math.min(speedMap.n - 1, i + 1);
+                float heading = (float) Math.atan2(speedMap.y[j] - speedMap.y[i], speedMap.x[j] - speedMap.x[i]);
+                trackView.setMarker(speedMap.x[i], speedMap.y[i], heading);
+            }
+            profileView.addTrace(s, v);
+        } else if (robotState != 0) {
+            liveTargetText.setText("-");
+            liveLapText.setText("-");
+            liveSyncText.setText("-");
+            trackView.addTrailPoint(x, y);
+            trackView.setMarker(x, y, yaw);
+        }
+    }
+
+    private void handleOdom(String line) {
+        String[] t = line.split(",");
+        if (t.length < 10) {
+            return;
+        }
+        odomX.setText(t[1]);
+        odomY.setText(t[2]);
+        odomYaw.setText(t[3]);
+        odomDistance.setText(t[4]);
+        odomWheels.setText(t[5] + " / " + t[6]);
+        odomGyro.setText(t[7]);
+        odomFusion.setText(t[8] + " / " + t[9]);
+    }
+
+    private void handleSensorFrame(String line) {
+        String[] t = line.split(",");
+        int position;
+        int active;
+        int lastEnd;
+        int[] values;
+        if (line.startsWith("S,")) {
+            // S,pos,actives,last_end,<3 hex per sensor, left to right>,battery_mV
+            if (t.length < 5) {
+                return;
+            }
+            position = parseInt(t, 1, 0);
+            active = parseInt(t, 2, 0);
+            lastEnd = parseInt(t, 3, 0);
+            String hex = t[4].trim();
+            int count = hex.length() / 3;
+            values = new int[count];
+            for (int i = 0; i < count; i++) {
+                try {
+                    values[i] = Integer.parseInt(hex.substring(i * 3, i * 3 + 3), 16);
+                } catch (NumberFormatException ex) {
+                    values[i] = 0;
+                }
+            }
+            int mv = parseInt(t, 5, 0);
+            if (mv > 0) {
+                voltageText.setText(String.format(Locale.US, "%.2f V", mv / 1000f));
+            }
+        } else {
+            // DBG,pos,actives,last_end,<9 encoder and IMU fields>,S1..Sn
+            if (t.length < 14) {
+                return;
+            }
+            position = parseInt(t, 1, 0);
+            active = parseInt(t, 2, 0);
+            lastEnd = parseInt(t, 3, 0);
+            int count = t.length - 13;
+            values = new int[count];
+            boolean reverse = profile.dbgRightToLeft || count == 16;
+            for (int i = 0; i < count; i++) {
+                int v = parseInt(t, 13 + i, 0);
+                values[reverse ? count - 1 - i : i] = v;
+            }
+        }
+
+        if (values.length != sensorBars.count() && values.length > 0) {
+            sensorBars.setCount(values.length);
+        }
+        int count = sensorBars.count();
+        int centre = (count + 1) * 500;
+        sensorBars.setData(values, (count + 1) * 1000 - position, active);
+
+        long now = SystemClock.uptimeMillis();
+        frameCount++;
+        if (now - frameWindowStart >= 1000) {
+            frameRate = frameCount * 1000f / Math.max(1, now - frameWindowStart);
+            frameCount = 0;
+            frameWindowStart = now;
+        }
+        // Last_end: 1 = the line was last seen on the right edge
+        String side = lastEnd == 1 ? "right" : "left";
+        if (active > 0) {
+            int error = centre - position;
+            sensorErrorText.setText(error > 0 ? "+" + error : String.valueOf(error));
+            sensorPositionText.setText(position + " / " + centre);
+            sensorSummaryText.setText(String.format(Locale.US, "Active %-3d Last end %-6s %4.1f Hz", active, side,
+                    frameRate));
+        } else {
+            sensorErrorText.setText("-");
+            sensorPositionText.setText("- / " + centre);
+            sensorSummaryText.setText(String.format(Locale.US, "Line lost  Last end %-6s %4.1f Hz", side, frameRate));
+        }
+    }
+
+    // ================================================================== Bluetooth
+
+    private void onConnectClicked() {
+        if (link.state() == BtLink.CONNECTED) {
+            link.send("Telemetry=off");
+            main.postDelayed(link::close, 150);
+        } else if (link.state() == BtLink.DISCONNECTED) {
+            connectSelected();
+        }
+    }
+
+    private void connectSelected() {
+        if (!missingPermissions().isEmpty()) {
+            requestBluetoothPermissionIfNeeded();
+            new AlertDialog.Builder(this)
+                    .setTitle("Bluetooth permission")
+                    .setMessage("Allow Nearby devices for this app in Android settings.")
+                    .setPositiveButton("Settings", (d, w) -> {
+                        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                        intent.setData(Uri.fromParts("package", getPackageName(), null));
+                        startActivity(intent);
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+        int index = deviceSpinner.getSelectedItemPosition();
+        if (index < 0 || index >= paired.size()) {
+            showWarning("Pair the robot's Bluetooth module in Android settings first");
+            return;
+        }
+        BluetoothDevice device = paired.get(index);
+        prefs().edit().putString("last.device", device.getAddress()).apply();
+        hideWarning();
+        link.connect(adapter, device);
+    }
+
+    private void requestBluetoothPermissionIfNeeded() {
+        ArrayList<String> missing = missingPermissions();
+        if (!missing.isEmpty()) {
+            requestPermissions(missing.toArray(new String[0]), REQUEST_BT);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_BT) {
+            loadPairedDevices();
+        }
+    }
+
+    private ArrayList<String> missingPermissions() {
+        ArrayList<String> list = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                list.add(Manifest.permission.BLUETOOTH_CONNECT);
+            }
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                list.add(Manifest.permission.BLUETOOTH_SCAN);
+            }
+        } else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            list.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+        return list;
+    }
+
+    private void loadPairedDevices() {
+        paired.clear();
+        ArrayList<String> names = new ArrayList<>();
+        if (adapter == null) {
+            names.add("Bluetooth not available");
+        } else if (!missingPermissions().isEmpty()) {
+            names.add("Bluetooth permission needed");
+        } else if (!adapter.isEnabled()) {
+            names.add("Bluetooth is off");
+        } else {
+            try {
+                Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+                for (BluetoothDevice device : bonded) {
+                    paired.add(device);
+                    String name = device.getName() == null ? "Unknown" : device.getName();
+                    names.add(name + "  " + device.getAddress());
+                }
+            } catch (SecurityException ex) {
+                paired.clear();
+                names.clear();
+                names.add("Bluetooth permission needed");
+            }
+            if (names.isEmpty()) {
+                names.add("No paired devices");
+            }
+        }
+        deviceSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
+        String last = prefs().getString("last.device", "");
+        for (int i = 0; i < paired.size(); i++) {
+            if (paired.get(i).getAddress().equals(last)) {
+                deviceSpinner.setSelection(i);
+                break;
+            }
+        }
+    }
+
+    // ================================================================== presets
+
+    private String presetListKey() {
+        return "presets." + profile.key;
+    }
+
+    private String presetKey(String name, String field) {
+        return "preset." + profile.key + "." + name + "." + field;
+    }
+
+    private boolean inPreset(Param p) {
+        return p.group == G_COMMON || p.group == G_TURBINE || p.group == G_CORNER;
     }
 
     private void loadPresetNames() {
         presetNames.clear();
-        String csv = prefs().getString(KEY_NAMES, "");
-        if (csv != null && !csv.trim().isEmpty()) {
-            String[] parts = csv.split("\\|", -1);
-            for (String part : parts) {
-                String name = part.trim();
-                if (!name.isEmpty()) {
-                    presetNames.add(name);
+        String joined = prefs().getString(presetListKey(), "");
+        if (joined != null) {
+            for (String part : joined.split("\\|", -1)) {
+                if (!part.trim().isEmpty()) {
+                    presetNames.add(part.trim());
                 }
             }
         }
@@ -1531,427 +1728,152 @@ public class MainActivity extends Activity {
     }
 
     private void saveCurrentPreset() {
-        String name = presetNameInput.getText().toString().trim();
+        String name = presetNameInput.getText().toString().trim().replace("|", "");
         if (name.isEmpty()) {
-            toast("Preset name is empty");
+            showWarning("Preset name is empty");
             return;
         }
-
         SharedPreferences.Editor editor = prefs().edit();
-        for (Map.Entry<String, EditText> entry : fields.entrySet()) {
-            editor.putString(keyFor(name, entry.getKey()), entry.getValue().getText().toString().trim());
+        for (Param p : params) {
+            if (inPreset(p)) {
+                editor.putString(presetKey(name, p.key), p.input.getText().toString().trim());
+            }
         }
-
         if (!presetNames.contains(name)) {
             presetNames.add(name);
         }
-        editor.putString(KEY_NAMES, joinPresetNames());
+        editor.putString(presetListKey(), TextUtils.join("|", presetNames));
         editor.apply();
         updatePresetSpinner();
-        selectPreset(name);
-        toast("Preset saved");
+        presetSpinner.setSelection(presetNames.indexOf(name));
     }
 
     private void loadPreset(String name) {
-        if (name == null || name.trim().isEmpty()) {
-            return;
-        }
         presetNameInput.setText(name);
-        for (Map.Entry<String, EditText> entry : fields.entrySet()) {
-            String current = entry.getValue().getText().toString();
-            String value = prefs().getString(keyFor(name, entry.getKey()), current);
-            entry.getValue().setText(value);
+        for (Param p : params) {
+            if (inPreset(p)) {
+                p.input.setText(prefs().getString(presetKey(name, p.key), p.input.getText().toString()));
+            }
         }
     }
 
     private void deleteSelectedPreset() {
-        String name = presetNameInput.getText().toString().trim();
-        if (name.isEmpty() || !presetNames.contains(name)) {
-            toast("No saved preset selected");
+        int index = presetSpinner.getSelectedItemPosition();
+        if (index < 0 || index >= presetNames.size()) {
             return;
         }
-
+        String name = presetNames.get(index);
         new AlertDialog.Builder(this)
                 .setTitle("Delete preset")
                 .setMessage(name)
-                .setPositiveButton("Delete", (dialog, which) -> {
+                .setPositiveButton("Delete", (d, w) -> {
                     SharedPreferences.Editor editor = prefs().edit();
-                    for (String key : fields.keySet()) {
-                        editor.remove(keyFor(name, key));
+                    for (Param p : params) {
+                        editor.remove(presetKey(name, p.key));
                     }
                     presetNames.remove(name);
-                    editor.putString(KEY_NAMES, joinPresetNames());
+                    editor.putString(presetListKey(), TextUtils.join("|", presetNames));
                     editor.apply();
                     updatePresetSpinner();
-                    if (!presetNames.isEmpty()) {
-                        loadPreset(presetNames.get(0));
-                    } else {
-                        setDefaultValues();
-                    }
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
     }
 
-    private String joinPresetNames() {
-        StringBuilder builder = new StringBuilder();
-        for (String name : presetNames) {
-            if (builder.length() > 0) {
-                builder.append('|');
-            }
-            builder.append(name);
-        }
-        return builder.toString();
-    }
-
-    private String keyFor(String presetName, String fieldName) {
-        return "preset." + presetName + "." + fieldName;
-    }
-
-    private void loadMappingSettings() {
-        SharedPreferences store = prefs();
-        setText(cleanSpeedInput, store.getString(KEY_CLEAN_SPEED, "170"));
-        setText(optStepInput, store.getString(KEY_OPT_STEP, "80"));
-        setText(optSmoothInput, store.getString(KEY_OPT_SMOOTH, "5"));
-        setText(optBaseSpeedInput, store.getString(KEY_OPT_BASE_SPEED, "40"));
-        setText(optGainInput, store.getString(KEY_OPT_GAIN, "60"));
-        setText(optMinSpeedInput, store.getString(KEY_OPT_MIN_SPEED, "35"));
-        setText(optMaxSpeedInput, store.getString(KEY_OPT_MAX_SPEED, "95"));
-        setText(mapPInput, store.getString(KEY_MAP_P, "90"));
-        setText(mapIInput, store.getString(KEY_MAP_I, "0"));
-        setText(mapDInput, store.getString(KEY_MAP_D, "10"));
-        setText(mapSpeedInput, store.getString(KEY_MAP_SPEED, "80"));
-        setText(joystickSpeedInput, store.getString(KEY_JOYSTICK_SPEED, "85"));
-        setText(btNameInput, store.getString(KEY_BT_NAME, "GRUZIK4.0"));
-    }
-
-    private void saveMappingSettings() {
-        if (cleanSpeedInput == null || optStepInput == null || mapPInput == null) {
-            return;
-        }
-        prefs().edit()
-                .putString(KEY_CLEAN_SPEED, cleanSpeedInput.getText().toString().trim())
-                .putString(KEY_OPT_STEP, optStepInput.getText().toString().trim())
-                .putString(KEY_OPT_SMOOTH, optSmoothInput.getText().toString().trim())
-                .putString(KEY_OPT_BASE_SPEED, optBaseSpeedInput.getText().toString().trim())
-                .putString(KEY_OPT_GAIN, optGainInput.getText().toString().trim())
-                .putString(KEY_OPT_MIN_SPEED, optMinSpeedInput.getText().toString().trim())
-                .putString(KEY_OPT_MAX_SPEED, optMaxSpeedInput.getText().toString().trim())
-                .putString(KEY_MAP_P, mapPInput.getText().toString().trim())
-                .putString(KEY_MAP_I, mapIInput.getText().toString().trim())
-                .putString(KEY_MAP_D, mapDInput.getText().toString().trim())
-                .putString(KEY_MAP_SPEED, mapSpeedInput.getText().toString().trim())
-                .putString(KEY_JOYSTICK_SPEED, joystickSpeedInput.getText().toString().trim())
-                .putString(KEY_BT_NAME, btNameInput == null ? "GRUZIK4.0" : btNameInput.getText().toString().trim())
-                .apply();
-    }
-
-    private void setText(EditText input, String value) {
-        if (input != null && value != null) {
-            input.setText(value);
-        }
-    }
-
     private void updatePresetSpinner() {
-        if (presetSpinner == null) {
-            return;
-        }
         ArrayList<String> names = new ArrayList<>(presetNames);
         if (names.isEmpty()) {
-            names.add("No saved presets");
+            names.add("No presets");
         }
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names);
-        presetSpinner.setAdapter(adapter);
+        presetSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
     }
 
-    private void selectPreset(String name) {
-        int index = presetNames.indexOf(name);
-        if (index >= 0) {
-            presetSpinner.setSelection(index);
-        }
-    }
+    // ================================================================== messages and helpers
 
     private SharedPreferences prefs() {
         return getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    private void setStatus(String status) {
-        statusText.setText(status);
+    private void showWarning(String message) {
+        warningText.setText(message);
+        warningText.setVisibility(View.VISIBLE);
+    }
+
+    private void hideWarning() {
+        warningText.setVisibility(View.GONE);
+    }
+
+    private void showBtStatus(String message) {
+        btNameStatus.setText(message);
+        btNameStatus.setVisibility(View.VISIBLE);
     }
 
     private void appendLog(String value) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post(() -> appendLog(value));
-            return;
+        String text = value.endsWith("\n") ? value : value + "\n";
+        synchronized (logBuffer) {
+            logBuffer.append(text);
+            if (logBuffer.length() > 9000) {
+                logBuffer.delete(0, logBuffer.length() - 8000);
+            }
+            if (logPosted) {
+                return;
+            }
+            logPosted = true;
         }
-
-        String current = logText.getText().toString();
-        String next = current + value;
-        if (next.length() > 6000) {
-            next = next.substring(next.length() - 6000);
-        }
-        logText.setText(next);
+        main.postDelayed(() -> {
+            synchronized (logBuffer) {
+                logPosted = false;
+                logText.setText(logBuffer.toString());
+            }
+        }, 120);
     }
 
-    private void updateVoltageFromRobotText(String value) {
-        int index = value.indexOf("Battery");
-        if (index < 0 || voltageText == null) {
-            return;
-        }
-
-        String tail = value.substring(index).trim();
+    private static String firstNumber(String text) {
         StringBuilder number = new StringBuilder();
-        for (int i = 0; i < tail.length(); i++) {
-            char c = tail.charAt(i);
-            if ((c >= '0' && c <= '9') || c == '.' || c == ',') {
-                number.append(c == ',' ? '.' : c);
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if ((c >= '0' && c <= '9') || c == '.') {
+                number.append(c);
             } else if (number.length() > 0) {
                 break;
             }
         }
-        if (number.length() > 0) {
-            voltageText.setText(number + " V");
+        return number.length() > 0 ? number.toString() : null;
+    }
+
+    private static int parseInt(String[] t, int index, int fallback) {
+        if (index < 0 || index >= t.length) {
+            return fallback;
         }
-    }
-
-    private void showError(String title, String message) {
-        new AlertDialog.Builder(this)
-                .setTitle(title)
-                .setMessage(message == null ? "Unknown error" : message)
-                .setPositiveButton("OK", null)
-                .show();
-    }
-
-    private void toast(String message) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
-    }
-
-    private TextView sectionTitle(String text) {
-        TextView label = label(text, 16, TEXT);
-        label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        return label;
-    }
-
-    private TextView label(String text, int sp, int color) {
-        TextView label = new TextView(this);
-        label.setText(text);
-        label.setTextSize(sp);
-        label.setTextColor(color);
-        label.setPadding(0, dp(4), 0, dp(4));
-        return label;
-    }
-
-    private TextView telemetryText(String text) {
-        TextView label = label(text, 14, TEXT);
-        label.setTypeface(Typeface.MONOSPACE);
-        label.setPadding(dp(10), dp(10), dp(10), dp(10));
-        label.setMinLines(2);
-        label.setBackground(panelDrawable(SURFACE_2, STROKE));
-        return label;
-    }
-
-    private EditText input(String hint) {
-        EditText input = new EditText(this);
-        input.setHint(hint);
-        input.setTextColor(TEXT);
-        input.setHintTextColor(MUTED);
-        input.setSingleLine(true);
-        input.setPadding(dp(10), 0, dp(10), 0);
-        input.setBackground(panelDrawable(SURFACE_2, STROKE));
-        return input;
-    }
-
-    private EditText smallInput(String value) {
-        EditText input = input(value);
-        input.setText(value);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        input.setGravity(Gravity.CENTER);
-        return input;
-    }
-
-    private Button button(String text) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setTextSize(13);
-        button.setTextColor(TEXT);
-        button.setAllCaps(false);
-        button.setBackground(buttonDrawable(SURFACE_2, SURFACE_PRESSED));
-        button.setPadding(dp(8), 0, dp(8), 0);
-        button.setMinHeight(dp(44));
-        button.setOnTouchListener((view, event) -> {
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                view.setAlpha(0.72f);
-            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                view.setAlpha(1.0f);
+        try {
+            return Integer.parseInt(t[index].trim());
+        } catch (NumberFormatException ex) {
+            try {
+                return Math.round(Float.parseFloat(t[index].trim()));
+            } catch (NumberFormatException ignored) {
+                return fallback;
             }
-            return false;
-        });
-        return button;
-    }
-
-    private Button primaryButton(String text, int color) {
-        Button button = button(text);
-        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setBackground(buttonDrawable(color, darker(color)));
-        return button;
-    }
-
-    private TextView blockLabel(String text) {
-        TextView label = label(text, 15, TEXT);
-        label.setGravity(Gravity.CENTER);
-        label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        label.setBackground(panelDrawable(SURFACE_2, STROKE));
-        return label;
-    }
-
-    private TextView blockValue(String text) {
-        TextView label = label(text, 16, TEXT);
-        label.setGravity(Gravity.CENTER);
-        label.setBackground(panelDrawable(SURFACE_2, STROKE));
-        return label;
-    }
-
-    private LinearLayout readoutPanel(String title, TextView value) {
-        LinearLayout panel = panel();
-        panel.addView(sectionTitle(title), matchWrap());
-        panel.addView(value, matchWrap());
-        return panel;
-    }
-
-    private LinearLayout twoReadouts(String leftLabel, TextView leftValue, String rightLabel, TextView rightValue) {
-        LinearLayout outer = row();
-        outer.addView(readoutBox(leftLabel, leftValue), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        outer.addView(readoutBox(rightLabel, rightValue), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        return outer;
-    }
-
-    private LinearLayout readoutBox(String title, TextView value) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(3), dp(3), dp(3), dp(3));
-        TextView label = label(title, 12, MUTED);
-        box.addView(label, matchWrap());
-        box.addView(value, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)));
-        return box;
-    }
-
-    private LinearLayout twoInputs(String leftLabel, EditText leftInput, String rightLabel, EditText rightInput) {
-        LinearLayout outer = row();
-        outer.addView(labeledInput(leftLabel, leftInput), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        outer.addView(labeledInput(rightLabel, rightInput), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        return outer;
-    }
-
-    private LinearLayout labeledInput(String title, EditText input) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(3), dp(3), dp(3), dp(3));
-        TextView label = label(title, 12, MUTED);
-        box.addView(label, matchWrap());
-        box.addView(input, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
-        return box;
-    }
-
-    private LinearLayout row() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        return row;
-    }
-
-    private LinearLayout panel() {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(10), dp(10), dp(10), dp(10));
-        panel.setBackground(panelDrawable(SURFACE, STROKE));
-        LinearLayout.LayoutParams params = matchWrap();
-        params.setMargins(0, dp(5), 0, dp(5));
-        panel.setLayoutParams(params);
-        return panel;
-    }
-
-    private GradientDrawable panelDrawable(int color, int stroke) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(color);
-        drawable.setCornerRadius(dp(8));
-        drawable.setStroke(dp(1), stroke);
-        return drawable;
-    }
-
-    private StateListDrawable buttonDrawable(int normal, int pressed) {
-        StateListDrawable states = new StateListDrawable();
-        states.addState(new int[]{android.R.attr.state_pressed}, panelDrawable(pressed, STROKE));
-        states.addState(new int[]{-android.R.attr.state_enabled}, panelDrawable(Color.rgb(45, 48, 54), Color.rgb(55, 58, 64)));
-        states.addState(new int[]{}, panelDrawable(normal, STROKE));
-        return states;
-    }
-
-    private int darker(int color) {
-        return Color.rgb(Math.round(Color.red(color) * 0.72f),
-                Math.round(Color.green(color) * 0.72f),
-                Math.round(Color.blue(color) * 0.72f));
-    }
-
-    private LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-    }
-
-    private LinearLayout.LayoutParams weightWrap() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        params.setMargins(dp(3), dp(3), dp(3), dp(3));
-        return params;
-    }
-
-    private void addSpacer(LinearLayout root, int dp) {
-        View spacer = new View(this);
-        root.addView(spacer, new LinearLayout.LayoutParams(1, dp(dp)));
-    }
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    private int readInt(EditText input, int fallback) {
-        try {
-            return Integer.parseInt(input.getText().toString().trim());
-        } catch (NumberFormatException ex) {
-            return fallback;
         }
     }
 
-    private float readFloat(EditText input, float fallback) {
-        try {
-            return Float.parseFloat(input.getText().toString().trim().replace(',', '.'));
-        } catch (NumberFormatException ex) {
-            return fallback;
-        }
-    }
+    private static final class Watcher implements TextWatcher {
+        private final Runnable onChange;
 
-    private float parseFloatToken(String[] tokens, int index, float fallback) {
-        if (index < 0 || index >= tokens.length) {
-            return fallback;
+        Watcher(Runnable onChange) {
+            this.onChange = onChange;
         }
 
-        try {
-            return Float.parseFloat(tokens[index].trim().replace(',', '.'));
-        } catch (NumberFormatException ex) {
-            return fallback;
+        @Override
+        public void beforeTextChanged(CharSequence s, int start, int count, int after) {
         }
-    }
 
-    private int clampInt(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
-    }
+        @Override
+        public void onTextChanged(CharSequence s, int start, int before, int count) {
+        }
 
-    private float clampFloat(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private void sleepMs(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
+        @Override
+        public void afterTextChanged(Editable s) {
+            onChange.run();
         }
     }
 }

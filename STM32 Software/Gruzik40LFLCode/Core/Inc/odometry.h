@@ -19,16 +19,19 @@ typedef struct
 typedef struct
 {
     Pose2D_t pose;
+    float yaw_unwrapped_rad;      /* continuous heading, not wrapped to +-pi */
     float gyro_yaw_rad;
     float encoder_yaw_rad;
     float last_delta_yaw_encoder_rad;
     float last_delta_yaw_gyro_rad;
     float last_delta_distance_m;
     float total_distance_m;
+    float last_dt_s;
     float gyro_weight;
+    float gyro_scale;
 } Odometry_t;
 
-void Odometry_Init(Odometry_t *odom, float gyro_weight);
+void Odometry_Init(Odometry_t *odom, float gyro_weight, float gyro_scale);
 void Odometry_Reset(Odometry_t *odom);
 void Odometry_Update(Odometry_t *odom, float left_delta_m, float right_delta_m, float gyro_z_dps, float dt_s);
 float Odometry_NormalizeAngle(float angle_rad);

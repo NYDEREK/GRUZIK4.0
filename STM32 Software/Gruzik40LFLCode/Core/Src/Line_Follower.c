@@ -233,28 +233,91 @@ static void past_errors(LineFollower_t *LF, int error)
     LF->Errors[0] = error;
 }
 
+/* Pivot with the Sharp_bend speeds towards side (+1 = line on the right) */
+static void corner_pivot(LineFollower_t *LF, int8_t side)
+{
+    if (side > 0)
+    {
+        motor_control(LF, LF->Sharp_bend_speed_right, LF->Sharp_bend_speed_left);
+    }
+    else
+    {
+        motor_control(LF, LF->Sharp_bend_speed_left, LF->Sharp_bend_speed_right);
+    }
+}
+
+static uint8_t CornerLatchUpdate(LineFollower_t *LF, float error)
+{
+    if (LF->CornerLatch == 0u)
+    {
+        LF->CornerLatched = 0u;
+        return 0u;
+    }
+
+    int8_t side = (error > 0.0f) ? 1 : -1;
+    if (LF->CornerLatched == 0u)
+    {
+        if (fabsf(error) >= LF->CornerIn)
+        {
+            LF->CornerLatched = 1u;
+            LF->CornerSide = side;
+        }
+    }
+    else if ((fabsf(error) <= LF->CornerOut) || ((side != LF->CornerSide) && (fabsf(error) > LF->CornerOut)))
+    {
+        LF->CornerLatched = 0u;
+    }
+
+    return LF->CornerLatched;
+}
+
 void PID_control(LineFollower_t *LF)
 {
     uint16_t position = (uint16_t)LineFollower_UpdateSensors(LF);
 
     if (LF->actives == 0)
     {
+        /* line lost: the latch side is a better guess than Last_end */
+        if ((LF->CornerLatched != 0u) && (LF->GapBridgeActive == 0u))
+        {
+            LF->Last_end = (LF->CornerSide > 0) ? 1 : 0;
+        }
         forward_brake(LF, 0.0f, 0.0f);
         return;
     }
 
     float error = 6500.0f - (float)position;
 
+    past_errors(LF, (int)error);
+    uint8_t window = LF->DWin;
+    if (window < 1u)
+    {
+        window = 1u;
+    }
+    if (window > 9u)
+    {
+        window = 9u;
+    }
+
     LF->P = error;
     LF->Error_P = error;
-    LF->D = error - LF->Last_error;
+    LF->D = (window == 1u) ? (error - LF->Last_error) : ((error - (float)LF->Errors[window]) / (float)window);
     LF->Error_D = LF->D;
     LF->Last_error = error;
-    past_errors(LF, (int)error);
+
+    float base_left = (LF->DynamicBaseActive != 0u) ? LF->DynamicBase : LF->Base_speed_L;
+    float base_right = (LF->DynamicBaseActive != 0u) ? LF->DynamicBase : LF->Base_speed_R;
+    if (LF->ErrSlow > 0.0f)
+    {
+        float ratio = clampf(fabsf(error) / 5500.0f, 0.0f, 1.0f);
+        float scale = 1.0f - (clampf(LF->ErrSlow, 0.0f, 1.0f) * ratio * ratio);
+        base_left *= scale;
+        base_right *= scale;
+    }
 
     float motor_speed = (LF->P * LF->Kp) + (LF->D * LF->Kd);
-    float left_speed = LF->Base_speed_L + motor_speed;
-    float right_speed = LF->Base_speed_R - motor_speed;
+    float left_speed = base_left + motor_speed;
+    float right_speed = base_right - motor_speed;
 
     left_speed = clampf(left_speed, -ROBOT_PWM_MAX, LF->Max_speed_L);
     right_speed = clampf(right_speed, -ROBOT_PWM_MAX, LF->Max_speed_R);
@@ -262,6 +325,14 @@ void PID_control(LineFollower_t *LF)
     LF->LastLineMotorRight = right_speed;
     LF->LastLineMotorLeft = left_speed;
     LF->GapBridgeArmed = GapBridgeCandidate(LF, error);
+
+    if (CornerLatchUpdate(LF, error) != 0u)
+    {
+        LF->GapBridgeActive = 0u;
+        LF->GapBridgeArmed = 0u;
+        corner_pivot(LF, LF->CornerSide);
+        return;
+    }
 
     forward_brake(LF, right_speed, left_speed);
 }

@@ -36,8 +36,13 @@ void Motor_SetEncoderDirection(motor_t *motor, int8_t direction)
     motor->EncoderDirection = (direction < 0) ? -1 : 1;
 }
 
-void Motor_CalculateSpeed(motor_t *motor)
+void Motor_CalculateSpeed(motor_t *motor, float dt_s)
 {
+    if (dt_s < ROBOT_ODOM_DT_MIN_S)
+    {
+        dt_s = ROBOT_CONTROL_DT_S;
+    }
+
     int32_t delta_counts = (int32_t)motor->EncoderValue - (int32_t)ROBOT_ENCODER_COUNTER_CENTER;
     delta_counts *= motor->EncoderDirection;
 
@@ -46,7 +51,7 @@ void Motor_CalculateSpeed(motor_t *motor)
     motor->DistanceInMeasurement = motor->NumberOfRotations * ROBOT_WHEEL_CIRCUMFERENCE_M;
     motor->DistanceTraveled += motor->DistanceInMeasurement;
 
-    motor->MetersPerSecond = motor->DistanceInMeasurement / ROBOT_CONTROL_DT_S;
+    motor->MetersPerSecond = motor->DistanceInMeasurement / dt_s;
     if ((motor->MetersPerSecond > 10.0f) || (motor->MetersPerSecond < -10.0f))
     {
         motor->MetersPerSecond = motor->PreviousMetersSecond;
@@ -54,9 +59,9 @@ void Motor_CalculateSpeed(motor_t *motor)
 
     LowPassFilter_Update(&motor->MetersPerSecondLPF, motor->MetersPerSecond);
     motor->PreviousMetersSecond = motor->MetersPerSecondLPF.output;
-    motor->LpfDistanceInMeasurement = motor->MetersPerSecondLPF.output * ROBOT_CONTROL_DT_S;
+    motor->LpfDistanceInMeasurement = motor->MetersPerSecondLPF.output * dt_s;
 
-    motor->RPM = motor->NumberOfRotations * (60.0f / ROBOT_CONTROL_DT_S);
+    motor->RPM = motor->NumberOfRotations * (60.0f / dt_s);
     if ((motor->RPM > 30000.0f) || (motor->RPM < -30000.0f))
     {
         motor->RPM = motor->PreviousRPM;

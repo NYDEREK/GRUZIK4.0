@@ -9,31 +9,49 @@
 
 #include "main.h"
 #include "odometry.h"
+#include "robot_config.h"
 
-#define MAP_SIZE 3000
+typedef struct
+{
+    float x;
+    float y;
+    float speed;
+} MapPoint_t;
+
+typedef struct
+{
+    float x_ri;
+    float y_ri;
+    float x_pc;
+    float y_pc;
+    float speed_mps;
+    float error_p;
+    float error_d;
+} MapRecord_t;
 
 typedef struct
 {
     uint8_t Mapping;
     uint8_t PlaybackActive;
-    float Map[MAP_SIZE][2];
 
-    float Kk;
-    float WayPoint[2][5];
-    float WayPointError;
-    float WayPointSpeedCompensation;
+    /* playback route, loaded from map.txt before the run */
+    MapPoint_t Points[ROBOT_MAP_MAX_POINTS];
+    uint16_t PointCount;
+    uint16_t PlayIndex;
+
+    /* GRUZIK.txt records, written by the main loop */
+    MapRecord_t Queue[ROBOT_MAP_SD_QUEUE_LEN];
+    volatile uint16_t QueueHead;
+    volatile uint16_t QueueTail;
+    volatile uint16_t QueueDropped;
 
     float Ti;
-    float Ri;
     float Xri;
     float PreviousXri;
     float Yri;
     float PreviousYri;
     float Ori;
     float PreviousOri;
-    float OriIMU;
-    float AlhphaOri;
-    float Qri[3];
     float Pci[2];
     float PreviousPci[2];
     float Si;
@@ -45,7 +63,18 @@ typedef struct
     float StartYri;
     float StartOri;
     float StartPci[2];
+    float StartDistance;
+    float StartHeading;
     uint16_t RecordedPoints;
+
+    /* lap closure */
+    uint8_t CloseCandidate;
+    float CloseMinDistance;
+    float CloseMinS;
+    float CloseMinHeading;
+    float CloseLength;
+    float CloseError;
+    float CloseTurn;
 
     float SetX;
     float SetY;
@@ -61,7 +90,6 @@ typedef struct
     float ErrorSum;
     float LastError;
     float FilteredErrorDerivative;
-    float mi;
 
     uint8_t loopNumber;
     uint8_t TargetValid;
@@ -70,8 +98,15 @@ typedef struct
 } Map_t;
 
 void Map_Reset(Map_t *map);
+uint8_t Map_LoadPlayback(Map_t *map);
 uint8_t Map_BeginPlayback(Map_t *map);
-uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p, float error_d);
+uint8_t MapUpdate(Map_t *map, const Odometry_t *odom, float speed_mps, float error_p, float error_d);
 uint8_t DriveOnMap(Map_t *map, const Pose2D_t *pose);
+
+/* main loop: move queued records to GRUZIK.txt */
+void Map_ServiceRecording(Map_t *map);
+void Map_FlushRecording(Map_t *map);
+uint8_t Map_GyroScaleSuggestion(const Map_t *map, float current_scale, float *suggested, int32_t *turns,
+                                float *error_rad);
 
 #endif /* INC_MAP_H_ */

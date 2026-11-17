@@ -33,10 +33,18 @@
 #define ROBOT_ENCODER_YAW_DIRECTION         1.0f
 #define ROBOT_IMU_Z_DIRECTION               1.0f
 
-#define ROBOT_ODOMETRY_GYRO_WEIGHT          0.96f
+/* Heading comes from the gyro only (1.0). Encoder yaw is still integrated for telemetry,
+   mixing it in only leaks wheel slip into the heading. */
+#define ROBOT_ODOMETRY_GYRO_WEIGHT          1.00f
+/* Gyro scale correction, 1.0 = datasheet 16.4 LSB/dps. Calibrated from a closed lap
+   (GYRO_SCALE reply after mapping) and sent by the app with GyroScale=. */
+#define ROBOT_GYRO_SCALE_DEFAULT            1.0f
 #define ROBOT_GYRO_STATIONARY_DPS           2.0f
 #define ROBOT_ENCODER_STATIONARY_M          0.00002f
 #define ROBOT_GYRO_BIAS_LEARN_RATE          0.0005f
+/* Odometry tick dt is measured with DWT, these bounds reject garbage */
+#define ROBOT_ODOM_DT_MIN_S                 0.0002f
+#define ROBOT_ODOM_DT_MAX_S                 0.0200f
 
 #define ROBOT_MAP_RECORD_EVERY_TICKS        40u
 #define ROBOT_MAP_TARGET_RADIUS_M           0.075f
@@ -44,6 +52,36 @@
 #define ROBOT_MAP_CLOSE_RADIUS_M            0.030f
 #define ROBOT_MAP_CLOSE_MIN_DISTANCE_M      0.450f
 #define ROBOT_MAP_CLOSE_MIN_POINTS          8u
+/* Lap closure with drift: inside this radius and with the heading back near the start
+   heading, the lap closes at the point closest to the start. */
+#define ROBOT_MAP_CLOSE_SEARCH_RADIUS_M     0.250f
+#define ROBOT_MAP_CLOSE_SEARCH_MIN_M        1.500f
+#define ROBOT_MAP_CLOSE_HEADING_RAD         0.52f
+#define ROBOT_MAP_CLOSE_LEAVE_M             0.020f
+#define ROBOT_MAP_SD_QUEUE_LEN              64u
+#define ROBOT_MAP_MAX_POINTS                2000u
+#define ROBOT_GYRO_SCALE_MAX_ERR_RAD        0.35f
+
+/* Speed map: track heading sampled every ROBOT_SPEEDMAP_DS_M of driven distance */
+#define ROBOT_SPEEDMAP_DS_M                 0.010f
+#define ROBOT_SPEEDMAP_MAX_SAMPLES          5000u
+#define ROBOT_SPEEDMAP_FILE                 "speedmap.bin"
+#define ROBOT_SPEEDMAP_MAX_LANDMARKS        96u
+/* Corner landmarks used to re-sync the driven distance with the map */
+#define ROBOT_SPEEDMAP_CORNER_ON_KAPPA      3.0f
+#define ROBOT_SPEEDMAP_CORNER_OFF_KAPPA     1.8f
+#define ROBOT_SPEEDMAP_CORNER_MIN_RAD       0.44f
+#define ROBOT_SPEEDMAP_SYNC_WINDOW_M        0.35f
+#define ROBOT_SPEEDMAP_SYNC_WINDOW_RATIO    0.08f
+#define ROBOT_SPEEDMAP_MAX_REVERSE_PWM      110.0f
+#define ROBOT_SPEEDMAP_DUMP_STEP            2u
+#define ROBOT_SPEEDMAP_DUMP_PER_LINE        24u
+
+/* Telemetry periods. 9600 baud carries about 960 bytes/s. */
+#define ROBOT_TELEMETRY_ODOM_PERIOD_MS      100u
+#define ROBOT_TELEMETRY_SENSOR_PERIOD_MS    45u
+#define ROBOT_TELEMETRY_LIVE_PERIOD_MS      100u
+#define ROBOT_FIRMWARE_VERSION              2u
 #define ROBOT_PLAYBACK_LINE_WEIGHT          0.18f
 #define ROBOT_PLAYBACK_LINE_CORR_LIMIT_PWM  35.0f
 #define ROBOT_PLAYBACK_ODOM_CORR_LIMIT_PWM  115.0f

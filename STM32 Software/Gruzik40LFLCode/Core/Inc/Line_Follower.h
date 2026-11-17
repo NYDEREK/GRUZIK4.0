@@ -68,6 +68,23 @@ typedef struct
 
     uint8_t LineFollowing;
 
+    /* Base PWM from the speed map (SpeedRun), replaces Base_speed while active */
+    float DynamicBase;
+    uint8_t DynamicBaseActive;
+
+    /* 90 degree corner handling for the normal PID, all off by default:
+       ErrSlow     0..1, base speed is cut by ErrSlow * (|error| / 5500)^2
+       CornerLatch 1 = once |error| >= CornerIn, pivot with the Sharp_bend speeds
+                   until |error| <= CornerOut (the line is back near the centre)
+       DWin        1..9, D term over the last DWin cycles (1 = previous behaviour) */
+    float ErrSlow;
+    uint8_t CornerLatch;
+    float CornerIn;
+    float CornerOut;
+    uint8_t DWin;
+    uint8_t CornerLatched;
+    int8_t CornerSide;
+
     uint32_t DSHOTTimer;
     uint32_t PreviousTimeDshot;
     uint32_t HighestDelayDshot;
@@ -84,7 +101,7 @@ enum state
     PidFollowing,
     Mapping,
     UnMapping,
-    SpeedUnMapping,
+    SpeedRun,
 };
 
 enum PowerState

@@ -2,12 +2,28 @@
  * odometry.c
  *
  * Encoder + gyro fused odometry for GRUZIK4.0.
+ *
+ * Heading: gyro integrated with the measured tick time (not an assumed 1 ms), corrected by
+ * gyro_scale. Distance: encoders. The midpoint heading is used for the x/y step.
  */
 
 #include "odometry.h"
 #include "robot_config.h"
 #include <math.h>
 #include <string.h>
+
+static float clamp01(float value)
+{
+    if (value < 0.0f)
+    {
+        return 0.0f;
+    }
+    if (value > 1.0f)
+    {
+        return 1.0f;
+    }
+    return value;
+}
 
 float Odometry_NormalizeAngle(float angle_rad)
 {
@@ -22,32 +38,27 @@ float Odometry_NormalizeAngle(float angle_rad)
     return angle_rad;
 }
 
-void Odometry_Init(Odometry_t *odom, float gyro_weight)
+void Odometry_Init(Odometry_t *odom, float gyro_weight, float gyro_scale)
 {
     memset(odom, 0, sizeof(*odom));
-    if (gyro_weight < 0.0f)
-    {
-        gyro_weight = 0.0f;
-    }
-    if (gyro_weight > 1.0f)
-    {
-        gyro_weight = 1.0f;
-    }
-    odom->gyro_weight = gyro_weight;
+    odom->gyro_weight = clamp01(gyro_weight);
+    odom->gyro_scale = ((gyro_scale > 0.8f) && (gyro_scale < 1.2f)) ? gyro_scale : 1.0f;
 }
 
 void Odometry_Reset(Odometry_t *odom)
 {
     float gyro_weight = odom->gyro_weight;
+    float gyro_scale = odom->gyro_scale;
     memset(odom, 0, sizeof(*odom));
     odom->gyro_weight = gyro_weight;
+    odom->gyro_scale = gyro_scale;
 }
 
 void Odometry_Update(Odometry_t *odom, float left_delta_m, float right_delta_m, float gyro_z_dps, float dt_s)
 {
     float delta_distance = 0.5f * (left_delta_m + right_delta_m);
     float delta_yaw_encoder = ((right_delta_m - left_delta_m) / ROBOT_WHEEL_BASE_M) * ROBOT_ENCODER_YAW_DIRECTION;
-    float delta_yaw_gyro = gyro_z_dps * DEG_TO_RAD * dt_s;
+    float delta_yaw_gyro = gyro_z_dps * odom->gyro_scale * DEG_TO_RAD * dt_s;
 
     float fused_delta_yaw = (odom->gyro_weight * delta_yaw_gyro) + ((1.0f - odom->gyro_weight) * delta_yaw_encoder);
     float previous_yaw = odom->pose.yaw_rad;
@@ -56,6 +67,7 @@ void Odometry_Update(Odometry_t *odom, float left_delta_m, float right_delta_m, 
     odom->pose.x_m += delta_distance * cosf(integration_yaw);
     odom->pose.y_m += delta_distance * sinf(integration_yaw);
     odom->pose.yaw_rad = Odometry_NormalizeAngle(previous_yaw + fused_delta_yaw);
+    odom->yaw_unwrapped_rad += fused_delta_yaw;
 
     odom->gyro_yaw_rad = Odometry_NormalizeAngle(odom->gyro_yaw_rad + delta_yaw_gyro);
     odom->encoder_yaw_rad = Odometry_NormalizeAngle(odom->encoder_yaw_rad + delta_yaw_encoder);
@@ -63,4 +75,5 @@ void Odometry_Update(Odometry_t *odom, float left_delta_m, float right_delta_m, 
     odom->last_delta_yaw_gyro_rad = delta_yaw_gyro;
     odom->last_delta_distance_m = delta_distance;
     odom->total_distance_m += fabsf(delta_distance);
+    odom->last_dt_s = dt_s;
 }

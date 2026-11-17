@@ -13,7 +13,13 @@ class JoystickView extends View {
         void onMove(float forward, float turn, boolean active);
     }
 
+    private static final int SURFACE = Color.rgb(24, 24, 26);
+    private static final int LINE = Color.rgb(52, 52, 57);
+    private static final int KNOB_IDLE = Color.rgb(44, 44, 48);
+    private static final int KNOB_ACTIVE = Color.rgb(236, 236, 238);
+
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF bounds = new RectF();
     private Listener listener;
     private float knobX;
     private float knobY;
@@ -22,7 +28,6 @@ class JoystickView extends View {
     JoystickView(Context context) {
         super(context);
         setMinimumHeight(dp(250));
-        setBackgroundColor(Color.TRANSPARENT);
     }
 
     void setListener(Listener listener) {
@@ -37,28 +42,23 @@ class JoystickView extends View {
         float cx = width * 0.5f;
         float cy = height * 0.5f;
         float radius = Math.min(width, height) * 0.38f;
-        float knobRadius = radius * 0.34f;
+        float knobRadius = radius * 0.30f;
 
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.rgb(18, 21, 26));
-        canvas.drawRoundRect(new RectF(0, 0, width, height), dp(8), dp(8), paint);
+        paint.setColor(SURFACE);
+        bounds.set(0, 0, width, height);
+        canvas.drawRoundRect(bounds, dp(6), dp(6), paint);
 
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2));
-        paint.setColor(Color.rgb(58, 66, 78));
+        paint.setStrokeWidth(dp(1));
+        paint.setColor(LINE);
         canvas.drawCircle(cx, cy, radius, paint);
         canvas.drawLine(cx - radius, cy, cx + radius, cy, paint);
         canvas.drawLine(cx, cy - radius, cx, cy + radius, paint);
 
-        float drawX = active ? knobX : cx;
-        float drawY = active ? knobY : cy;
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(active ? Color.rgb(20, 184, 166) : Color.rgb(31, 36, 44));
-        canvas.drawCircle(drawX, drawY, knobRadius, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2));
-        paint.setColor(Color.rgb(148, 163, 184));
-        canvas.drawCircle(drawX, drawY, knobRadius, paint);
+        paint.setColor(active ? KNOB_ACTIVE : KNOB_IDLE);
+        canvas.drawCircle(active ? knobX : cx, active ? knobY : cy, knobRadius, paint);
     }
 
     @Override
@@ -91,9 +91,7 @@ class JoystickView extends View {
             }
             knobX = cx + dx;
             knobY = cy + dy;
-            float turn = dx / radius;
-            float forward = -dy / radius;
-            notifyMove(forward, turn, true);
+            notifyMove(-dy / radius, dx / radius, true);
             invalidate();
             return true;
         }

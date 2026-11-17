@@ -45,7 +45,7 @@ typedef struct
 
 void Motor_Init(motor_t *motor, float Kp, float Ki);
 void Motor_SetEncoderDirection(motor_t *motor, int8_t direction);
-void Motor_CalculateSpeed(motor_t *motor);
+void Motor_CalculateSpeed(motor_t *motor, float dt_s);
 void PI_Loop(motor_t *motor);
 
 #endif /* INC_MOTOR_H_ */

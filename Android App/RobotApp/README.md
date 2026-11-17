@@ -1,49 +1,32 @@
-# Gruzik Robot Android App
+# NYDER LF (Android)
 
-Bluetooth Classic controller for the STM32 robot UART parser in `SimpleParser.c`.
+Aplikacja Bluetooth do line followerow GRUZIK4.0 i REGIN V3. Wyglad i uklad jak w aplikacji REGIN V3, protokol tekstowy z `SimpleParser.c`.
 
-## Ready APK
+## Gotowy APK
 
-Gotowy debug APK do pobrania jest tutaj:
+`apk/GRUZIK4.0-debug.apk` (build debug, podpisany kluczem debug Androida). Zastepuje poprzednia aplikacje GRUZIK4.0 (ten sam `applicationId`).
 
-`apk/GRUZIK4.0-debug.apk`
+## Rozpoznanie robota
 
-To jest build debug podpisany standardowym kluczem debug Androida, wystarczajacy do instalacji/testow na telefonie.
+Po polaczeniu aplikacja wysyla `Info=1`. Firmware GRUZIK4.0 v2 odpowiada `INFO,...` z lista mozliwosci. Starsze firmware i REGIN V3 sa rozpoznawane po nazwie modulu Bluetooth. W `Settings` mozna wymusic typ robota. Nastawy i presety sa trzymane osobno dla kazdego robota.
 
-Protocol sent to robot:
+## Zakladki
 
-```text
-Kp=0.015\n
-Kd=0.55\n
-Base_speed=125\n
-Max_speed=200\n
-Sharp_bend_speed_right=-75\n
-Sharp_bend_speed_left=120\n
-Bend_speed_right=-75\n
-Bend_speed_left=120\n
-Treshold=3300\n
-Turbine_Speed=0\n
-Turbine_Prep_Time=0\n
-Mode=Y\n
-Mode=N\n
+- `Drive` - PID, predkosci, opcje zakretow 90 stopni (GRUZIK v2), turbina (REGIN), presety, czyszczenie opon. `Start` i `Stop` sa zawsze na gorze.
+- `Sensors` - slupki czujnikow od lewej do prawej, prog, pozycja linii, blad i czestotliwosc odswiezania.
+- `Mapping` - trasa na zywo, mapa predkosci, wykres profilu, nastawy, kalibracja zyroskopu, stary tryb trasy po odometrii (`map.txt`).
+- `Joystick`, `Odometry`, `Log`, `Settings`.
+
+Telemetria jest jedna naraz i zalezy od otwartej zakladki (9600 bodow to ok. 960 B/s).
+
+## Budowanie
+
+```bash
+./gradlew assembleDebug
 ```
 
-Mapping protocol:
+Gradle potrzebuje JDK 17+, np. tego z Android Studio:
 
-```text
-Mode=M\n                 # select mapping mode
-Mode=U\n                 # select playback/unmapping mode
-MapDump=recorded\n       # robot streams GRUZIK.txt as MAP_BEGIN/MAP/MAP_END
-MapDump=optimized\n      # robot streams map.txt as MAP_BEGIN/MAP/MAP_END
-MapUploadBegin=<count>\n # app starts writing map.txt on SD
-MapPoint=<x>,<y>,<pwm>\n # one optimized waypoint
-MapUploadEnd=1\n         # app closes map.txt
-
-Bluetooth service:
-BtName=<name>\n          # stores requested HC-04/HC-05 name in btname.txt on SD
-BtNameNow=<name>\n       # tries AT rename immediately if the module is already in AT mode
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ```
-
-Open this folder in Android Studio, let it sync Gradle, then build/install on the phone.
-Pair the HC-04/HC-05 module in Android Bluetooth settings first, then connect from the app.
-After a real module rename, remove the old Android pairing and pair the module again so Android refreshes the displayed name.

@@ -11,6 +11,8 @@
 #include "map.h"
 #include "odometry.h"
 #include "robot_config.h"
+#include "speed_map.h"
+#include "telemetry.h"
 #include "usart.h"
 #include <math.h>
 #include <stdio.h>
@@ -24,6 +26,8 @@ extern uint8_t SDReadingReady;
 extern uint8_t RxData;
 extern Map_t map;
 extern Odometry_t RobotOdom;
+extern SpeedMap_t SpeedMap;
+volatile uint8_t MapRecordFileOpen = 0u;
 volatile uint8_t TelemetryMode = TELEMETRY_OFF;
 volatile uint8_t TireCleaningActive = 0u;
 volatile uint8_t ManualDriveActive = 0u;
@@ -36,7 +40,23 @@ static uint32_t ManualDriveLastTick = 0u;
 
 static void UartSend(const char *text)
 {
-    HAL_UART_Transmit(&huart1, (uint8_t *)text, strlen(text), 500);
+    Uart_Send(text);
+}
+
+/* Closes the shared SD file. A mapping file gets the queued records first. */
+static void SdCloseFile(void)
+{
+    if (SdFileOpen == 0u)
+    {
+        return;
+    }
+    if (MapRecordFileOpen != 0u)
+    {
+        Map_FlushRecording(&map);
+        MapRecordFileOpen = 0u;
+    }
+    f_close(&SdCardFile);
+    SdFileOpen = 0u;
 }
 
 static void SendFatFsError(const char *prefix, const char *operation, const char *file_name, FRESULT result)
@@ -268,6 +288,7 @@ static void BluetoothSetBaud(uint32_t baud)
         return;
     }
 
+    (void)Uart_WaitTxIdle(200u);
     (void)HAL_UART_DeInit(&huart1);
     huart1.Init.BaudRate = baud;
     (void)HAL_UART_Init(&huart1);
@@ -283,6 +304,7 @@ static uint8_t BluetoothResponseOk(const char *response)
 static uint8_t BluetoothSendAtCommand(const char *command, char *response, size_t response_size)
 {
     memset(response, 0, response_size);
+    (void)Uart_WaitTxIdle(200u);
     (void)HAL_UART_Transmit(&huart1, (uint8_t *)command, (uint16_t)strlen(command), 300);
 
     uint32_t start_ms = HAL_GetTick();
@@ -552,11 +574,7 @@ static void Manual_drive_change(LineFollower_t *LF)
         return;
     }
 
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
 
     TireCleaningActive = 0u;
     ManualDriveActive = 1u;
@@ -589,11 +607,7 @@ static void Tire_clean_change(LineFollower_t *LF)
             return;
         }
 
-        if (SdFileOpen != 0u)
-        {
-            f_close(&SdCardFile);
-            SdFileOpen = 0u;
-        }
+        SdCloseFile();
 
         LF->LineFollowing = 0u;
         LF->PowerMode = Stop;
@@ -680,11 +694,7 @@ static void Bluetooth_name_now(LineFollower_t *LF)
         return;
     }
 
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
 
     LF->LineFollowing = 0u;
     LF->PowerMode = Stop;
@@ -723,14 +733,50 @@ void Parser_FinishMappingAutoClosed(LineFollower_t *LF)
     motor_control(LF, 0.0f, 0.0f);
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
 
-    if (SdFileOpen != 0u)
+    SdCloseFile();
+
+    char tx[112];
+    snprintf(tx, sizeof(tx), "MAP_AUTO_CLOSED,%ld,%ld,%ld,%u\r\n",
+             (long)lroundf(map.CloseError * 1000.0f),
+             (long)lroundf(map.CloseLength * 1000.0f),
+             (long)lroundf(map.CloseTurn * RAD_TO_DEG * 100.0f),
+             (unsigned int)map.QueueDropped);
+    UartSend(tx);
+
+    float suggested = 1.0f;
+    float turn_error = 0.0f;
+    int32_t turns = 0;
+    if (Map_GyroScaleSuggestion(&map, RobotOdom.gyro_scale, &suggested, &turns, &turn_error) != 0u)
     {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
+        snprintf(tx, sizeof(tx), "GYRO_SCALE,%.5f,%ld,%ld\r\n", suggested, (long)turns,
+                 (long)lroundf(turn_error * RAD_TO_DEG * 100.0f));
+        UartSend(tx);
     }
 
-    UartSend("MAP_AUTO_CLOSED,start_radius_3cm\r\n");
+    SpeedMap_FinishRecording(&SpeedMap, 1u, map.CloseLength, map.StartHeading + map.CloseTurn);
+    if (SpeedMap_Build(&SpeedMap) != 0u)
+    {
+        SpeedMap_SendReady(&SpeedMap);
+    }
 }
+
+/* Main loop work outside a command: saving the speed map after mapping */
+void Parser_ServiceBackground(LineFollower_t *LF)
+{
+    if ((SpeedMap.dirty != 0u) && (LF->PowerMode != Start) && (SpeedMap.recording == 0u))
+    {
+        if (SpeedMap_Save(&SpeedMap) != 0u)
+        {
+            UartSend("SPEEDMAP_SAVED\r\n");
+        }
+        else
+        {
+            SpeedMap.dirty = 0u;
+            UartSend("SPEEDMAP_ERROR,save\r\n");
+        }
+    }
+}
+
 
 static void Telemetry_change(void)
 {
@@ -749,6 +795,16 @@ static void Telemetry_change(void)
     {
         TelemetryMode = TELEMETRY_DEBUG;
         UartSend("TELEMETRY,debug\r\n");
+    }
+    else if ((!strcmp(parse_pointer, "sensors")) || (!strcmp(parse_pointer, "3")))
+    {
+        TelemetryMode = TELEMETRY_SENSORS;
+        UartSend("TELEMETRY,sensors\r\n");
+    }
+    else if ((!strcmp(parse_pointer, "live")) || (!strcmp(parse_pointer, "4")))
+    {
+        TelemetryMode = TELEMETRY_LIVE;
+        UartSend("TELEMETRY,live\r\n");
     }
     else
     {
@@ -812,11 +868,7 @@ static void SendMapDump(LineFollower_t *LF)
     const char *dump_kind = "recorded";
     const char *file_name = MapFileFromKind(requested_kind, &dump_kind);
 
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
 
     if (SdOpenFile("MAP_ERROR", "open_read", file_name, FA_READ) == 0u)
     {
@@ -853,11 +905,7 @@ static void MapUploadBegin(LineFollower_t *LF)
     float expected_count = 0.0f;
     (void)ParseFloatValue(&expected_count);
 
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
 
     if (SdOpenFile("UPLOAD_ERROR", "open_write", ROBOT_MAP_INPUT_FILE, FA_WRITE | FA_CREATE_ALWAYS) == 0u)
     {
@@ -906,11 +954,7 @@ static void MapUploadPoint(void)
 
 static void MapUploadEnd(void)
 {
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
 
     char tx[80];
     snprintf(tx, sizeof(tx), "UPLOAD_DONE,%u,%u\r\n", MapUploadPointCount, MapUploadExpectedCount);
@@ -934,6 +978,10 @@ static void SetState(LineFollower_t *LF, uint8_t state)
     {
         UartSend("State: UnMapping\r\n");
     }
+    else if (state == SpeedRun)
+    {
+        UartSend("State: SpeedRun\r\n");
+    }
     else
     {
         UartSend("State: PID\r\n");
@@ -942,8 +990,12 @@ static void SetState(LineFollower_t *LF, uint8_t state)
 
 static void StopRobot(LineFollower_t *LF)
 {
+    uint8_t was_mapping = ((LF->PowerMode == Start) && (LF->state == Mapping) && (map.Mapping != 0u)) ? 1u : 0u;
+
     LF->LineFollowing = 0u;
     LF->PowerMode = Stop;
+    LF->DynamicBaseActive = 0u;
+    SpeedMap.running = 0u;
     map.Mapping = 0u;
     map.PlaybackActive = 0u;
     TireCleaningActive = 0u;
@@ -954,10 +1006,16 @@ static void StopRobot(LineFollower_t *LF)
     motor_control(LF, 0.0f, 0.0f);
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
 
-    if (SdFileOpen != 0u)
+    SdCloseFile();
+
+    if (was_mapping != 0u)
     {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
+        /* stopped by hand: keep the open lap, it can still be driven once */
+        SpeedMap_FinishRecording(&SpeedMap, 0u, 0.0f, 0.0f);
+        if (SpeedMap_Build(&SpeedMap) != 0u)
+        {
+            SpeedMap_SendReady(&SpeedMap);
+        }
     }
 
     LF->battery_voltage = ((float)LF->Adc1_Values[4] * 8.15f) / 3322.0f;
@@ -978,9 +1036,14 @@ static void PrepareStoppedStart(LineFollower_t *LF)
 {
     LF->LineFollowing = 0u;
     LF->PowerMode = Stop;
+    LF->DynamicBaseActive = 0u;
+    SpeedMap.running = 0u;
     map.Mapping = 0u;
     map.PlaybackActive = 0u;
-    TelemetryMode = TELEMETRY_OFF;
+    if (TelemetryMode != TELEMETRY_LIVE)
+    {
+        TelemetryMode = TELEMETRY_OFF;
+    }
     TireCleaningActive = 0u;
     ManualDriveActive = 0u;
     LF->GapBridgeActive = 0u;
@@ -989,11 +1052,7 @@ static void PrepareStoppedStart(LineFollower_t *LF)
     motor_control(LF, 0.0f, 0.0f);
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
 
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
 
     LF->AverageSpeed = 0.0f;
     LF->MaxSpeed = 0.0f;
@@ -1020,11 +1079,7 @@ static void StartRobot(LineFollower_t *LF)
         LF->Speed_level = 1.0f;
     }
 
-    if (SdFileOpen != 0u)
-    {
-        f_close(&SdCardFile);
-        SdFileOpen = 0u;
-    }
+    SdCloseFile();
     TireCleaningActive = 0u;
     ManualDriveActive = 0u;
     LF->GapBridgeActive = 0u;
@@ -1045,15 +1100,23 @@ static void StartRobot(LineFollower_t *LF)
     LF->LastLineMotorLeft = 0.0f;
     LF->GapBridgeStartMs = 0u;
     LF->UnMappingDone = 0u;
+    LF->CornerLatched = 0u;
+    LF->DynamicBase = 0.0f;
+    LF->DynamicBaseActive = 0u;
+    memset(LF->Errors, 0, sizeof(LF->Errors));
+    SpeedMap.running = 0u;
+    SpeedMap.recording = 0u;
 
     if (LF->state == Mapping)
     {
-        if (SdOpenFile("MAP_ERROR", "open_write", ROBOT_MAP_OUTPUT_FILE, FA_WRITE | FA_CREATE_ALWAYS) == 0u)
+        /* The speed map lives in RAM, without a card only GRUZIK.txt is skipped */
+        if (SdOpenFile("MAP_WARNING", "open_write", ROBOT_MAP_OUTPUT_FILE, FA_WRITE | FA_CREATE_ALWAYS) != 0u)
         {
-            return;
+            SdFileOpen = 1u;
+            MapRecordFileOpen = 1u;
         }
-        SdFileOpen = 1u;
         map.Mapping = 1u;
+        SpeedMap_BeginRecording(&SpeedMap);
     }
     else if (LF->state == UnMapping)
     {
@@ -1062,13 +1125,28 @@ static void StartRobot(LineFollower_t *LF)
             return;
         }
         SdFileOpen = 1u;
+        (void)Map_LoadPlayback(&map);
+        SdCloseFile();
         if (Map_BeginPlayback(&map) == 0u)
         {
             UartSend("map.txt is empty or invalid\r\n");
-            f_close(&SdCardFile);
-            SdFileOpen = 0u;
             return;
         }
+    }
+    else if (LF->state == SpeedRun)
+    {
+        if ((SpeedMap.count < 50u) && (SpeedMap_Load(&SpeedMap) == 0u))
+        {
+            UartSend("SPEEDMAP_ERROR,empty\r\n");
+            return;
+        }
+        if ((SpeedMap_Build(&SpeedMap) == 0u) || (SpeedMap_BeginRun(&SpeedMap) == 0u))
+        {
+            UartSend("SPEEDMAP_ERROR,build\r\n");
+            return;
+        }
+        SpeedMap_SendReady(&SpeedMap);
+        LF->DynamicBaseActive = 1u;
     }
 
     snprintf(buffer, sizeof(buffer), "Start\r\nBattery = %0.2f V\r\nSpeed_level = %0.2f\r\n",
@@ -1090,6 +1168,10 @@ static void StartWithState(LineFollower_t *LF, uint8_t state)
     else if (state == UnMapping)
     {
         UartSend("STARTING,playback\r\n");
+    }
+    else if (state == SpeedRun)
+    {
+        UartSend("STARTING,speedrun\r\n");
     }
     else
     {
@@ -1126,6 +1208,10 @@ static void App_Controll(char rx_data, LineFollower_t *LF)
     else if (rx_data == 'U')
     {
         SetState(LF, UnMapping);
+    }
+    else if (rx_data == 'S')
+    {
+        SetState(LF, SpeedRun);
     }
 }
 
@@ -1166,7 +1252,135 @@ static void State_change(LineFollower_t *LF)
     }
 }
 
+static void SpeedMap_param_change(float *target, float scale)
+{
+    float value = 0.0f;
+    if (ParseFloatValue(&value))
+    {
+        *target = value * scale;
+        SpeedMap.built = 0u;
+    }
+}
+
+static void SpeedMap_laps_change(void)
+{
+    float value = 0.0f;
+    if (ParseFloatValue(&value))
+    {
+        SpeedMap.params.laps = (value < 0.0f) ? 0u : (uint16_t)value;
+    }
+}
+
+static void Gyro_scale_change(void)
+{
+    float value = 0.0f;
+    if (ParseFloatValue(&value) && (value > 0.8f) && (value < 1.2f))
+    {
+        RobotOdom.gyro_scale = value;
+    }
+}
+
+static void Gyro_weight_change(void)
+{
+    float value = 0.0f;
+    if (ParseFloatValue(&value) && (value >= 0.0f) && (value <= 1.0f))
+    {
+        RobotOdom.gyro_weight = value;
+    }
+}
+
+static void Corner_param_change(LineFollower_t *LF, const char *key)
+{
+    float value = 0.0f;
+    if (!ParseFloatValue(&value))
+    {
+        return;
+    }
+
+    if (!strcmp(key, "ErrSlow"))
+    {
+        LF->ErrSlow = (value < 0.0f) ? 0.0f : ((value > 1.0f) ? 1.0f : value);
+    }
+    else if (!strcmp(key, "CornerLatch"))
+    {
+        LF->CornerLatch = (value > 0.5f) ? 1u : 0u;
+        LF->CornerLatched = 0u;
+    }
+    else if (!strcmp(key, "CornerIn"))
+    {
+        LF->CornerIn = value;
+    }
+    else if (!strcmp(key, "CornerOut"))
+    {
+        LF->CornerOut = value;
+    }
+    else if (!strcmp(key, "DWin"))
+    {
+        LF->DWin = (value < 1.0f) ? 1u : ((value > 9.0f) ? 9u : (uint8_t)value);
+    }
+}
+
+static uint8_t SpeedMap_EnsureLoaded(void)
+{
+    if ((SpeedMap.count >= 50u) || (SpeedMap_Load(&SpeedMap) != 0u))
+    {
+        return 1u;
+    }
+    UartSend("SPEEDMAP_ERROR,empty\r\n");
+    return 0u;
+}
+
+static void SpeedMap_build_command(LineFollower_t *LF)
+{
+    if (LF->PowerMode == Start)
+    {
+        UartSend("SPEEDMAP_ERROR,stop_robot_first\r\n");
+        return;
+    }
+    if (SpeedMap_EnsureLoaded() == 0u)
+    {
+        return;
+    }
+    if (SpeedMap_Build(&SpeedMap) == 0u)
+    {
+        UartSend("SPEEDMAP_ERROR,build\r\n");
+        return;
+    }
+    SpeedMap_SendReady(&SpeedMap);
+}
+
+static void SpeedMap_dump_command(LineFollower_t *LF)
+{
+    if (LF->PowerMode == Start)
+    {
+        UartSend("SPEEDMAP_ERROR,stop_robot_first\r\n");
+        return;
+    }
+    if (SpeedMap_EnsureLoaded() == 0u)
+    {
+        return;
+    }
+    TelemetryMode = TELEMETRY_OFF;
+    SpeedMap_Dump(&SpeedMap);
+}
+
+static void SpeedMap_clear_command(LineFollower_t *LF)
+{
+    if (LF->PowerMode == Start)
+    {
+        UartSend("SPEEDMAP_ERROR,stop_robot_first\r\n");
+        return;
+    }
+    SpeedMap_Clear(&SpeedMap);
+    if (SDReadingReady != 0u)
+    {
+        (void)f_unlink(ROBOT_SPEEDMAP_FILE);
+    }
+    UartSend("SPEEDMAP_CLEARED\r\n");
+}
+
 void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower)
+
 {
     char *parse_pointer = strtok((char *)ReceivedData, "=");
     if (parse_pointer == NULL)
@@ -1304,7 +1518,82 @@ void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower)
     {
         MapUploadEnd();
     }
+    else if (!strcmp("Info", parse_pointer))
+    {
+        Telemetry_SendInfo();
+    }
+    else if (!strcmp("StartSpeedRun", parse_pointer))
+    {
+        Start_command(LineFollower, SpeedRun);
+    }
+    else if (!strcmp("SpeedMapBuild", parse_pointer))
+    {
+        SpeedMap_build_command(LineFollower);
+    }
+    else if (!strcmp("SpeedMapDump", parse_pointer))
+    {
+        SpeedMap_dump_command(LineFollower);
+    }
+    else if (!strcmp("SpeedMapClear", parse_pointer))
+    {
+        SpeedMap_clear_command(LineFollower);
+    }
+    else if (!strcmp("SmVmax", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.v_max, 1.0f);
+    }
+    else if (!strcmp("SmVmin", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.v_min, 1.0f);
+    }
+    else if (!strcmp("SmAcc", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.accel, 1.0f);
+    }
+    else if (!strcmp("SmBrake", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.brake, 1.0f);
+    }
+    else if (!strcmp("SmLat", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.lat_accel, 1.0f);
+    }
+    else if (!strcmp("SmLag", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.lag_s, 0.001f);
+    }
+    else if (!strcmp("SmWin", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.window_m, 0.01f);
+    }
+    else if (!strcmp("SmKp", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.speed_kp, 1.0f);
+    }
+    else if (!strcmp("SmFF", parse_pointer))
+    {
+        SpeedMap_param_change(&SpeedMap.params.speed_ff, 1.0f);
+    }
+    else if (!strcmp("SmLaps", parse_pointer))
+    {
+        SpeedMap_laps_change();
+    }
+    else if (!strcmp("GyroScale", parse_pointer))
+    {
+        Gyro_scale_change();
+    }
+    else if (!strcmp("GyroWeight", parse_pointer))
+    {
+        Gyro_weight_change();
+    }
+    else if ((!strcmp("ErrSlow", parse_pointer)) || (!strcmp("CornerLatch", parse_pointer)) ||
+             (!strcmp("CornerIn", parse_pointer)) || (!strcmp("CornerOut", parse_pointer)) ||
+             (!strcmp("DWin", parse_pointer)))
+    {
+        Corner_param_change(LineFollower, parse_pointer);
+    }
 }
+
 
 void Read_Settings_From_EEprom(LineFollower_t *LF, int mode)
 {

@@ -19,7 +19,9 @@ typedef enum
 {
     TELEMETRY_OFF = 0,
     TELEMETRY_ODOM = 1,
-    TELEMETRY_DEBUG = 2
+    TELEMETRY_DEBUG = 2,
+    TELEMETRY_SENSORS = 3,
+    TELEMETRY_LIVE = 4
 } TelemetryMode_t;
 
 extern volatile uint8_t TelemetryMode;
@@ -29,6 +31,7 @@ extern volatile uint8_t ManualDriveActive;
 void Parser_TakeLine(RingBuffer_t *Buf, uint8_t *ReceivedData);
 void Parser_Parse(uint8_t *ReceivedData, LineFollower_t *LineFollower);
 void Parser_FinishMappingAutoClosed(LineFollower_t *LineFollower);
+void Parser_ServiceBackground(LineFollower_t *LineFollower);
 void Parser_ServiceManualDriveTimeout(LineFollower_t *LineFollower);
 uint8_t Parser_ServicePendingBluetoothName(void);
 void Read_Settings_From_EEprom(LineFollower_t *LF, int mode);

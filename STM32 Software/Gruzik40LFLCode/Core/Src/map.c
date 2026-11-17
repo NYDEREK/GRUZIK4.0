@@ -16,9 +16,9 @@
 extern LineFollower_t GRUZIK;
 extern FRESULT FatFsResult;
 extern FIL SdCardFile;
+extern volatile uint8_t MapRecordFileOpen;
 
 static uint8_t ReadMapLine(Map_t *map);
-static void WriteMapRecord(float x_ri, float y_ri, float x_pc, float y_pc, float speed_mps, float error_p, float error_d);
 
 static float clampf(float value, float min_value, float max_value)
 {
@@ -110,74 +110,84 @@ static uint8_t ShouldAdvanceTarget(const Map_t *map, const Pose2D_t *pose, float
 
 static uint8_t ReadMapLine(Map_t *map)
 {
-    char line[96];
-
-    while (1)
+    if (map->PlayIndex >= map->PointCount)
     {
-        UINT len = 0u;
-        uint8_t i = 0u;
-        uint8_t sample = 0u;
+        return 0u;
+    }
 
-        while (i < (uint8_t)(sizeof(line) - 1u))
+    const MapPoint_t *point = &map->Points[map->PlayIndex];
+    map->PlayIndex++;
+    map->SetX = point->x;
+    map->SetY = point->y;
+    map->SetSpeed = point->speed;
+    return 1u;
+}
+
+static void QueueRecord(Map_t *map, float x_ri, float y_ri, float x_pc, float y_pc, float speed_mps, float error_p,
+                        float error_d)
+{
+    uint16_t next = (uint16_t)((map->QueueHead + 1u) % ROBOT_MAP_SD_QUEUE_LEN);
+    if (next == map->QueueTail)
+    {
+        map->QueueDropped++;
+        return;
+    }
+
+    MapRecord_t *record = &map->Queue[map->QueueHead];
+    record->x_ri = x_ri;
+    record->y_ri = y_ri;
+    record->x_pc = x_pc;
+    record->y_pc = y_pc;
+    record->speed_mps = speed_mps;
+    record->error_p = error_p;
+    record->error_d = error_d;
+    map->QueueHead = next;
+}
+
+static uint8_t WriteQueuedRecord(Map_t *map)
+{
+    if (map->QueueTail == map->QueueHead)
+    {
+        return 0u;
+    }
+
+    const MapRecord_t *r = &map->Queue[map->QueueTail];
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\n",
+             r->x_ri, r->y_ri, r->x_pc, r->y_pc, r->speed_mps, r->error_p, r->error_d);
+    f_puts((TCHAR *)buffer, &SdCardFile);
+    map->QueueTail = (uint16_t)((map->QueueTail + 1u) % ROBOT_MAP_SD_QUEUE_LEN);
+    return 1u;
+}
+
+void Map_ServiceRecording(Map_t *map)
+{
+    if (MapRecordFileOpen == 0u)
+    {
+        map->QueueTail = map->QueueHead;
+        return;
+    }
+
+    for (uint8_t i = 0u; i < 8u; i++)
+    {
+        if (WriteQueuedRecord(map) == 0u)
         {
-            if ((f_read(&SdCardFile, &sample, 1, &len) != FR_OK) || (len == 0u))
-            {
-                break;
-            }
-
-            if (sample == '\r')
-            {
-                continue;
-            }
-
-            if (sample == '\n')
-            {
-                break;
-            }
-
-            line[i++] = (char)sample;
+            break;
         }
-        line[i] = '\0';
-
-        if ((i == 0u) && (len == 0u))
-        {
-            return 0u;
-        }
-
-        char *token = strtok(line, " \t");
-        if (token == NULL)
-        {
-            continue;
-        }
-        map->SetX = strtof(token, NULL);
-
-        token = strtok(NULL, " \t");
-        if (token == NULL)
-        {
-            continue;
-        }
-        map->SetY = strtof(token, NULL);
-
-        token = strtok(NULL, " \t");
-        if (token != NULL)
-        {
-            map->SetSpeed = clampf(strtof(token, NULL), -ROBOT_PWM_MAX, ROBOT_PWM_MAX);
-        }
-        else
-        {
-            map->SetSpeed = map->DefaultPlaybackSpeed;
-        }
-
-        return 1u;
     }
 }
 
-static void WriteMapRecord(float x_ri, float y_ri, float x_pc, float y_pc, float speed_mps, float error_p, float error_d)
+void Map_FlushRecording(Map_t *map)
 {
-    uint8_t buffer[128];
-    snprintf((char *)buffer, sizeof(buffer), "%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\t%0.3f\n",
-             x_ri, y_ri, x_pc, y_pc, speed_mps, error_p, error_d);
-    f_puts((TCHAR *)buffer, &SdCardFile);
+    if (MapRecordFileOpen == 0u)
+    {
+        map->QueueTail = map->QueueHead;
+        return;
+    }
+
+    while (WriteQueuedRecord(map) != 0u)
+    {
+    }
 }
 
 void Map_Reset(Map_t *map)
@@ -194,6 +204,70 @@ void Map_Reset(Map_t *map)
     map->DefaultPlaybackSpeed = (default_speed > 0.0f) ? default_speed : 80.0f;
 }
 
+/* Reads the already opened map.txt into RAM, so the 1 kHz interrupt never waits for the SD card */
+uint8_t Map_LoadPlayback(Map_t *map)
+{
+    char line[96];
+    map->PointCount = 0u;
+    map->PlayIndex = 0u;
+
+    while (map->PointCount < ROBOT_MAP_MAX_POINTS)
+    {
+        UINT len = 0u;
+        uint8_t i = 0u;
+        uint8_t sample = 0u;
+
+        while (i < (uint8_t)(sizeof(line) - 1u))
+        {
+            if ((f_read(&SdCardFile, &sample, 1, &len) != FR_OK) || (len == 0u))
+            {
+                break;
+            }
+            if (sample == '\r')
+            {
+                continue;
+            }
+            if (sample == '\n')
+            {
+                break;
+            }
+            line[i++] = (char)sample;
+        }
+        line[i] = '\0';
+
+        if ((i == 0u) && (len == 0u))
+        {
+            break;
+        }
+
+        char *token = strtok(line, " \t,");
+        if (token == NULL)
+        {
+            continue;
+        }
+        float x = strtof(token, NULL);
+        token = strtok(NULL, " \t,");
+        if (token == NULL)
+        {
+            continue;
+        }
+        float y = strtof(token, NULL);
+        float speed = map->DefaultPlaybackSpeed;
+        token = strtok(NULL, " \t,");
+        if (token != NULL)
+        {
+            speed = clampf(strtof(token, NULL), -ROBOT_PWM_MAX, ROBOT_PWM_MAX);
+        }
+
+        map->Points[map->PointCount].x = x;
+        map->Points[map->PointCount].y = y;
+        map->Points[map->PointCount].speed = speed;
+        map->PointCount++;
+    }
+
+    return (map->PointCount > 0u) ? 1u : 0u;
+}
+
 uint8_t Map_BeginPlayback(Map_t *map)
 {
     map->PlaybackActive = 0u;
@@ -203,6 +277,7 @@ uint8_t Map_BeginPlayback(Map_t *map)
     map->PreviousSetX = 0.0f;
     map->PreviousSetY = 0.0f;
     map->TargetValid = 0u;
+    map->PlayIndex = 0u;
 
     if (ReadMapLine(map) == 0u)
     {
@@ -214,13 +289,26 @@ uint8_t Map_BeginPlayback(Map_t *map)
     return 1u;
 }
 
-uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error_p, float error_d)
+static uint8_t CloseLap(Map_t *map, float speed_mps, float error_p, float error_d)
+{
+    QueueRecord(map, map->StartXri, map->StartYri, map->StartPci[0], map->StartPci[1], speed_mps, error_p, error_d);
+    map->RecordedPoints++;
+    map->CloseLength = map->CloseMinS;
+    map->CloseError = map->CloseMinDistance;
+    map->CloseTurn = map->CloseMinHeading - map->StartHeading;
+    map->AutoClosed = 1u;
+    map->Mapping = 0u;
+    return 0u;
+}
+
+uint8_t MapUpdate(Map_t *map, const Odometry_t *odom, float speed_mps, float error_p, float error_d)
 {
     if (map->Mapping == 0u)
     {
         return 1u;
     }
 
+    const Pose2D_t *pose = &odom->pose;
     map->PreviousXri = map->Xri;
     map->PreviousYri = map->Yri;
     map->PreviousOri = map->Ori;
@@ -241,6 +329,8 @@ uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error
         map->StartOri = map->Ori;
         map->StartPci[0] = map->Pci[0];
         map->StartPci[1] = map->Pci[1];
+        map->StartDistance = odom->total_distance_m;
+        map->StartHeading = odom->yaw_unwrapped_rad;
         map->PreviousXri = map->Xri;
         map->PreviousYri = map->Yri;
         map->PreviousOri = map->Ori;
@@ -248,7 +338,7 @@ uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error
         map->PreviousPci[1] = map->Pci[1];
         map->Ai = map->Ori;
         map->PreviousAi = map->Ori;
-        WriteMapRecord(map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
+        QueueRecord(map, map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
         map->RecordedPoints++;
         return 1u;
     }
@@ -268,25 +358,72 @@ uint8_t MapUpdate(Map_t *map, const Pose2D_t *pose, float speed_mps, float error
     if (map->loopNumber >= ROBOT_MAP_RECORD_EVERY_TICKS)
     {
         map->loopNumber = 0u;
-        WriteMapRecord(map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
+        QueueRecord(map, map->Xri, map->Yri, map->Pci[0], map->Pci[1], speed_mps, error_p, error_d);
         map->RecordedPoints++;
     }
-
     map->loopNumber++;
+
+    float driven = odom->total_distance_m - map->StartDistance;
+    if ((driven < ROBOT_MAP_CLOSE_MIN_DISTANCE_M) || (map->RecordedPoints < ROBOT_MAP_CLOSE_MIN_POINTS))
+    {
+        return 1u;
+    }
+
     float close_dx = map->Xri - map->StartXri;
     float close_dy = map->Yri - map->StartYri;
     float close_distance = sqrtf((close_dx * close_dx) + (close_dy * close_dy));
-    if ((map->Si >= ROBOT_MAP_CLOSE_MIN_DISTANCE_M) &&
-        (map->RecordedPoints >= ROBOT_MAP_CLOSE_MIN_POINTS) &&
-        (close_distance <= ROBOT_MAP_CLOSE_RADIUS_M))
+    float heading_error = Odometry_NormalizeAngle(odom->yaw_unwrapped_rad - map->StartHeading);
+
+    if (close_distance <= ROBOT_MAP_CLOSE_RADIUS_M)
     {
-        WriteMapRecord(map->StartXri, map->StartYri, map->StartPci[0], map->StartPci[1], speed_mps, error_p, error_d);
-        map->RecordedPoints++;
-        map->AutoClosed = 1u;
-        map->Mapping = 0u;
+        if ((map->CloseCandidate == 0u) || (close_distance < map->CloseMinDistance))
+        {
+            map->CloseMinDistance = close_distance;
+            map->CloseMinS = driven;
+            map->CloseMinHeading = odom->yaw_unwrapped_rad;
+        }
+        return CloseLap(map, speed_mps, error_p, error_d);
+    }
+
+    /* Drifted odometry rarely comes back within 3 cm: close at the point nearest to the start */
+    if ((driven >= ROBOT_MAP_CLOSE_SEARCH_MIN_M) && (close_distance <= ROBOT_MAP_CLOSE_SEARCH_RADIUS_M) &&
+        (fabsf(heading_error) < ROBOT_MAP_CLOSE_HEADING_RAD))
+    {
+        if ((map->CloseCandidate == 0u) || (close_distance < map->CloseMinDistance))
+        {
+            map->CloseCandidate = 1u;
+            map->CloseMinDistance = close_distance;
+            map->CloseMinS = driven;
+            map->CloseMinHeading = odom->yaw_unwrapped_rad;
+        }
+        else if (close_distance > (map->CloseMinDistance + ROBOT_MAP_CLOSE_LEAVE_M))
+        {
+            return CloseLap(map, speed_mps, error_p, error_d);
+        }
+    }
+    else if (map->CloseCandidate != 0u)
+    {
+        return CloseLap(map, speed_mps, error_p, error_d);
+    }
+
+    return 1u;
+}
+
+uint8_t Map_GyroScaleSuggestion(const Map_t *map, float current_scale, float *suggested, int32_t *turns,
+                                float *error_rad)
+{
+    const float full_turn = 2.0f * M_PI;
+    int32_t n = (int32_t)lroundf(map->CloseTurn / full_turn);
+    *turns = n;
+    *error_rad = map->CloseTurn - ((float)n * full_turn);
+    *suggested = current_scale;
+
+    if ((map->AutoClosed == 0u) || (n == 0) || (fabsf(*error_rad) > ROBOT_GYRO_SCALE_MAX_ERR_RAD))
+    {
         return 0u;
     }
 
+    *suggested = current_scale * (((float)n * full_turn) / map->CloseTurn);
     return 1u;
 }
 
